@@ -142,7 +142,7 @@ pub fn apply_turn(pos: &Position, turn: &Turn) -> Position {
 mod tests {
     use super::*;
     use crate::board::Board;
-    use crate::position::{Position, SpellCounter};
+    use crate::position::{Position, SpellCounter, CastleRights};
     use crate::types::{Color, PieceKind};
 
     fn dests(pos: &Position, sq: Square) -> Vec<Square> {
@@ -369,5 +369,48 @@ mod tests {
         pos = apply_turn(&pos, &quiet(&pos, "a6", "a5")); // Black reply
         assert_eq!(pos.spells(Color::White).freeze, SpellCounter { count: 4, lock: 0 });
         assert!(pos.spells(Color::White).freeze.castable());
+    }
+
+    #[test]
+    fn vector_15_castling_under_freeze() {
+        // Position: {e1:'0K', h1:'0R', a1:'0R', e8:'2K', h8:'2R', a8:'2R'}, all castling rights on.
+        let mut pos = Position { board: Board::empty(), castle_rights: CastleRights::all(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("h1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("h8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("a8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
+
+        // Baseline: both castles available
+        assert!(dests(&pos, Square::from_str("e1").unwrap()).contains(&Square::from_str("g1").unwrap()));
+        assert!(dests(&pos, Square::from_str("e1").unwrap()).contains(&Square::from_str("c1").unwrap()));
+
+        // freeze@c1 (king's landing square for queenside castle) → no effect
+        let mut pos_c1 = pos.clone();
+        pos_c1.fields.push(crate::position::SpellField {
+            square: Square::from_str("c1").unwrap(), owner: Color::Black,
+            kind: crate::position::SpellKind::Freeze, expires_after_ply: pos_c1.ply + 1,
+        });
+        assert!(dests(&pos_c1, Square::from_str("e1").unwrap()).contains(&Square::from_str("g1").unwrap()));
+        assert!(dests(&pos_c1, Square::from_str("e1").unwrap()).contains(&Square::from_str("c1").unwrap()));
+
+        // freeze@a1 (queenside rook) → queenside lost, kingside available
+        let mut pos_a1 = pos.clone();
+        pos_a1.fields.push(crate::position::SpellField {
+            square: Square::from_str("a1").unwrap(), owner: Color::Black,
+            kind: crate::position::SpellKind::Freeze, expires_after_ply: pos_a1.ply + 1,
+        });
+        assert!(dests(&pos_a1, Square::from_str("e1").unwrap()).contains(&Square::from_str("g1").unwrap()));
+        assert!(!dests(&pos_a1, Square::from_str("e1").unwrap()).contains(&Square::from_str("c1").unwrap()));
+
+        // freeze@g1 (kingside rook square) → kingside lost, queenside available
+        let mut pos_g1 = pos.clone();
+        pos_g1.fields.push(crate::position::SpellField {
+            square: Square::from_str("g1").unwrap(), owner: Color::Black,
+            kind: crate::position::SpellKind::Freeze, expires_after_ply: pos_g1.ply + 1,
+        });
+        assert!(!dests(&pos_g1, Square::from_str("e1").unwrap()).contains(&Square::from_str("g1").unwrap()));
+        assert!(dests(&pos_g1, Square::from_str("e1").unwrap()).contains(&Square::from_str("c1").unwrap()));
     }
 }
