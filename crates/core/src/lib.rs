@@ -19,3 +19,6 @@ pub mod spells;
 
 pub mod legal;
 pub use legal::{Turn, SpellCast, generate_turns, legal_moves, apply_move_only, apply_turn};
+
+pub mod terminal;
+pub use terminal::{GameStatus, game_status};
