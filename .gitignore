@@ -2,3 +2,9 @@
 # redistribute. Keep locally for reverse-engineering/testing only.
 research/variants.js
 research/variants.pretty.js
+
+# local git worktrees used for isolated feature work
+.worktrees/
+
+# Rust build artifacts
+target/
