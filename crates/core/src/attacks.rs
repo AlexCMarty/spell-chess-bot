@@ -14,32 +14,41 @@ pub fn is_square_attacked(pos: &Position, square: Square, by: Color) -> bool {
     let pawn_dir: i8 = if by == Color::White { -1 } else { 1 };
     for df in [-1i8, 1i8] {
         let (f, r) = (square.file() as i8 + df, square.rank() as i8 + pawn_dir);
-        if (0..8).contains(&f) && (0..8).contains(&r) && has(pos, Square::new(f as u8, r as u8), by, PieceKind::Pawn) {
-            return true;
+        if (0..8).contains(&f) && (0..8).contains(&r) {
+            let sq = Square::new(f as u8, r as u8);
+            if has(pos, sq, by, PieceKind::Pawn) && !crate::spells::is_square_frozen(pos, sq) {
+                return true;
+            }
         }
     }
     for (df, dr) in KNIGHT_OFFSETS {
         let (f, r) = (square.file() as i8 + df, square.rank() as i8 + dr);
-        if (0..8).contains(&f) && (0..8).contains(&r) && has(pos, Square::new(f as u8, r as u8), by, PieceKind::Knight) {
-            return true;
+        if (0..8).contains(&f) && (0..8).contains(&r) {
+            let sq = Square::new(f as u8, r as u8);
+            if has(pos, sq, by, PieceKind::Knight) && !crate::spells::is_square_frozen(pos, sq) {
+                return true;
+            }
         }
     }
     for (df, dr) in KING_OFFSETS {
         let (f, r) = (square.file() as i8 + df, square.rank() as i8 + dr);
-        if (0..8).contains(&f) && (0..8).contains(&r) && has(pos, Square::new(f as u8, r as u8), by, PieceKind::King) {
-            return true;
+        if (0..8).contains(&f) && (0..8).contains(&r) {
+            let sq = Square::new(f as u8, r as u8);
+            if has(pos, sq, by, PieceKind::King) && !crate::spells::is_square_frozen(pos, sq) {
+                return true;
+            }
         }
     }
     for dir in ROOK_DIRS {
         if let Some(&sq) = walk_ray(pos, square, dir).last() {
-            if has(pos, sq, by, PieceKind::Rook) || has(pos, sq, by, PieceKind::Queen) {
+            if !crate::spells::is_square_frozen(pos, sq) && (has(pos, sq, by, PieceKind::Rook) || has(pos, sq, by, PieceKind::Queen)) {
                 return true;
             }
         }
     }
     for dir in BISHOP_DIRS {
         if let Some(&sq) = walk_ray(pos, square, dir).last() {
-            if has(pos, sq, by, PieceKind::Bishop) || has(pos, sq, by, PieceKind::Queen) {
+            if !crate::spells::is_square_frozen(pos, sq) && (has(pos, sq, by, PieceKind::Bishop) || has(pos, sq, by, PieceKind::Queen)) {
                 return true;
             }
         }
@@ -75,5 +84,17 @@ mod tests {
         pos.board.set(Square::from_str("d2").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Pawn }));
         assert!(is_square_attacked(&pos, Square::from_str("e3").unwrap(), Color::White));
         assert!(!is_square_attacked(&pos, Square::from_str("d3").unwrap(), Color::White));
+    }
+
+    #[test]
+    fn vector_4_frozen_piece_exerts_no_control() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("h4").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        assert!(is_square_attacked(&pos, Square::from_str("d4").unwrap(), Color::White));
+        pos.fields.push(crate::position::SpellField {
+            square: Square::from_str("h4").unwrap(), owner: Color::Black,
+            kind: crate::position::SpellKind::Freeze, expires_after_ply: pos.ply + 1,
+        });
+        assert!(!is_square_attacked(&pos, Square::from_str("d4").unwrap(), Color::White));
     }
 }

@@ -153,4 +153,22 @@ mod tests {
         assert!(rook_dests.contains(&Square::from_str("d5").unwrap()));
         assert!(!rook_dests.contains(&Square::from_str("d6").unwrap()));
     }
+
+    #[test]
+    fn vector_5_freezing_the_checker_dispels_check() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d8").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("h8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
+        pos.side_to_move = Color::Black;
+        assert!(crate::attacks::is_square_attacked(&pos, Square::from_str("e8").unwrap(), Color::White));
+        pos.fields.push(crate::position::SpellField {
+            square: Square::from_str("d8").unwrap(), owner: Color::Black,
+            kind: crate::position::SpellKind::Freeze, expires_after_ply: pos.ply + 1,
+        });
+        let h8_dests = dests(&pos, Square::from_str("h8").unwrap());
+        assert!(h8_dests.contains(&Square::from_str("h7").unwrap()));
+    }
 }
