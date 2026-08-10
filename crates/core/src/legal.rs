@@ -205,4 +205,44 @@ mod tests {
         });
         assert_eq!(dests(&pos, Square::from_str("d2").unwrap()), vec![Square::from_str("d4").unwrap()]);
     }
+
+    #[test]
+    fn vector_9_king_capture_via_jump() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d2").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Bishop }));
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("h2").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("b4").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Bishop }));
+        pos.board.set(Square::from_str("a8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
+        pos.side_to_move = Color::Black;
+        pos.fields.push(crate::position::SpellField {
+            square: Square::from_str("d2").unwrap(), owner: Color::Black,
+            kind: crate::position::SpellKind::Jump, expires_after_ply: pos.ply + 1,
+        });
+        let capture = PieceMove::quiet(Square::from_str("b4").unwrap(), Square::from_str("e1").unwrap());
+        assert!(legal_moves(&pos).contains(&capture));
+        let after = apply_move_only(&pos, &capture);
+        assert_eq!(after.board.king_square(Color::White), None);
+    }
+
+    #[test]
+    fn vector_12_check_through_jump_square_is_unblockable() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d2").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Bishop }));
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("h2").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("b4").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Bishop }));
+        pos.fields.push(crate::position::SpellField {
+            square: Square::from_str("d2").unwrap(), owner: Color::Black,
+            kind: crate::position::SpellKind::Jump, expires_after_ply: pos.ply + 1,
+        });
+        assert!(dests(&pos, Square::from_str("a1").unwrap()).is_empty());
+        assert!(dests(&pos, Square::from_str("d2").unwrap()).contains(&Square::from_str("b4").unwrap()));
+        let king_dests = dests(&pos, Square::from_str("e1").unwrap());
+        assert!(!king_dests.is_empty());
+    }
 }
