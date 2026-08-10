@@ -106,11 +106,43 @@ pub fn generate_turns(pos: &Position) -> Vec<Turn> {
     turns
 }
 
+pub fn apply_turn(pos: &Position, turn: &Turn) -> Position {
+    let mover = pos.side_to_move;
+    let mut next = apply_move_only(pos, &turn.mv);
+
+    if let Some(cast) = turn.spell {
+        next.fields.push(SpellField {
+            square: cast.square, owner: mover, kind: cast.kind, expires_after_ply: pos.ply + 1,
+        });
+        let counter = match (cast.kind, mover) {
+            (SpellKind::Freeze, Color::White) => &mut next.white_spells.freeze,
+            (SpellKind::Freeze, Color::Black) => &mut next.black_spells.freeze,
+            (SpellKind::Jump, Color::White) => &mut next.white_spells.jump,
+            (SpellKind::Jump, Color::Black) => &mut next.black_spells.jump,
+        };
+        counter.count -= 1;
+        counter.lock = 3;
+    }
+
+    // A side's lock decrements once per turn its opponent completes (rules/20-spell-system.md#cooldown-timing).
+    let opponent_spells = match mover {
+        Color::White => &mut next.black_spells,
+        Color::Black => &mut next.white_spells,
+    };
+    if opponent_spells.freeze.lock > 0 { opponent_spells.freeze.lock -= 1; }
+    if opponent_spells.jump.lock > 0 { opponent_spells.jump.lock -= 1; }
+
+    next.ply = pos.ply + 1;
+    next.fields.retain(|f| next.ply <= f.expires_after_ply);
+    next.side_to_move = mover.opposite();
+    next
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::board::Board;
-    use crate::position::Position;
+    use crate::position::{Position, SpellCounter};
     use crate::types::{Color, PieceKind};
 
     fn dests(pos: &Position, sq: Square) -> Vec<Square> {
@@ -303,5 +335,39 @@ mod tests {
         pos.white_spells.freeze.lock = 2;
         let turns = generate_turns(&pos);
         assert!(!turns.iter().any(|t| t.spell.is_some()));
+    }
+
+    #[test]
+    fn vector_18_cooldown_timeline() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("a8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
+
+        let cast = SpellCast { kind: SpellKind::Freeze, square: Square::from_str("d5").unwrap() };
+        let mv = PieceMove::quiet(Square::from_str("a1").unwrap(), Square::from_str("a2").unwrap());
+        pos = apply_turn(&pos, &Turn { spell: Some(cast), mv });
+        assert_eq!(pos.spells(Color::White).freeze, SpellCounter { count: 4, lock: 3 });
+        assert!(pos.fields.is_empty() == false);
+
+        let quiet = |_pos: &Position, from: &str, to: &str| Turn {
+            spell: None,
+            mv: PieceMove::quiet(Square::from_str(from).unwrap(), Square::from_str(to).unwrap()),
+        };
+
+        pos = apply_turn(&pos, &quiet(&pos, "a8", "a7")); // Black's reply
+        assert_eq!(pos.spells(Color::White).freeze, SpellCounter { count: 4, lock: 2 });
+        assert!(pos.fields.is_empty());
+
+        pos = apply_turn(&pos, &quiet(&pos, "a2", "a3")); // White N+1
+        assert_eq!(pos.spells(Color::White).freeze, SpellCounter { count: 4, lock: 2 });
+        pos = apply_turn(&pos, &quiet(&pos, "a7", "a6")); // Black reply
+        assert_eq!(pos.spells(Color::White).freeze, SpellCounter { count: 4, lock: 1 });
+        pos = apply_turn(&pos, &quiet(&pos, "a3", "a4")); // White N+2
+        assert_eq!(pos.spells(Color::White).freeze, SpellCounter { count: 4, lock: 1 });
+        pos = apply_turn(&pos, &quiet(&pos, "a6", "a5")); // Black reply
+        assert_eq!(pos.spells(Color::White).freeze, SpellCounter { count: 4, lock: 0 });
+        assert!(pos.spells(Color::White).freeze.castable());
     }
 }
