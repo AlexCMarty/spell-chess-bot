@@ -1,6 +1,18 @@
-use crate::position::Position;
+use crate::position::{Position, SpellField, SpellKind};
 use crate::movegen::{pseudo_legal_moves, PieceMove};
 use crate::types::{Color, Piece, PieceKind, Square};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpellCast {
+    pub kind: SpellKind,
+    pub square: Square,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Turn {
+    pub spell: Option<SpellCast>,
+    pub mv: PieceMove,
+}
 
 pub fn apply_move_only(pos: &Position, mv: &PieceMove) -> Position {
     let mut next = pos.clone();
@@ -64,6 +76,34 @@ pub fn legal_moves(pos: &Position) -> Vec<PieceMove> {
             }
         })
         .collect()
+}
+
+fn position_with_field(pos: &Position, cast: SpellCast) -> Position {
+    let mut next = pos.clone();
+    next.fields.push(SpellField {
+        square: cast.square,
+        owner: pos.side_to_move,
+        kind: cast.kind,
+        expires_after_ply: pos.ply + 1,
+    });
+    next
+}
+
+pub fn generate_turns(pos: &Position) -> Vec<Turn> {
+    let mut turns: Vec<Turn> = legal_moves(pos).into_iter().map(|mv| Turn { spell: None, mv }).collect();
+    let color = pos.side_to_move;
+
+    for sq in crate::spells::freeze_targets(pos, color) {
+        let cast = SpellCast { kind: SpellKind::Freeze, square: sq };
+        let hypothetical = position_with_field(pos, cast);
+        turns.extend(legal_moves(&hypothetical).into_iter().map(|mv| Turn { spell: Some(cast), mv }));
+    }
+    for sq in crate::spells::jump_targets(pos, color) {
+        let cast = SpellCast { kind: SpellKind::Jump, square: sq };
+        let hypothetical = position_with_field(pos, cast);
+        turns.extend(legal_moves(&hypothetical).into_iter().map(|mv| Turn { spell: Some(cast), mv }));
+    }
+    turns
 }
 
 #[cfg(test)]
@@ -244,5 +284,24 @@ mod tests {
         assert!(dests(&pos, Square::from_str("d2").unwrap()).contains(&Square::from_str("b4").unwrap()));
         let king_dests = dests(&pos, Square::from_str("e1").unwrap());
         assert!(!king_dests.is_empty());
+    }
+
+    #[test]
+    fn generate_turns_includes_no_spell_and_spell_options_at_start() {
+        let pos = Position::starting();
+        let turns = generate_turns(&pos);
+        let no_spell_count = turns.iter().filter(|t| t.spell.is_none()).count();
+        assert_eq!(no_spell_count, legal_moves(&pos).len());
+        assert!(turns.iter().any(|t| matches!(t.spell, Some(SpellCast { kind: SpellKind::Freeze, .. }))));
+        assert!(turns.iter().any(|t| matches!(t.spell, Some(SpellCast { kind: SpellKind::Jump, .. }))));
+    }
+
+    #[test]
+    fn vector_19_illegal_casts_are_never_offered() {
+        let mut pos = Position::starting();
+        pos.white_spells.jump.count = 0;
+        pos.white_spells.freeze.lock = 2;
+        let turns = generate_turns(&pos);
+        assert!(!turns.iter().any(|t| t.spell.is_some()));
     }
 }

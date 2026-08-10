@@ -18,4 +18,4 @@ pub use attacks::is_square_attacked;
 pub mod spells;
 
 pub mod legal;
-pub use legal::{apply_move_only, legal_moves};
+pub use legal::{Turn, SpellCast, generate_turns, legal_moves, apply_move_only};
