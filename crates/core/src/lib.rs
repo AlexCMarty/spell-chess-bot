@@ -11,3 +11,6 @@ pub mod rays;
 
 pub mod movegen;
 pub use movegen::{PieceMove, Promotion, pseudo_legal_moves};
+
+pub mod attacks;
+pub use attacks::is_square_attacked;
