@@ -113,6 +113,19 @@ fn pawn_moves(pos: &Position, sq: Square, color: Color) -> Vec<PieceMove> {
     out
 }
 
+fn slide_moves(pos: &Position, sq: Square, dirs: &[(i8, i8)], color: Color) -> Vec<PieceMove> {
+    let mut out = Vec::new();
+    for &dir in dirs {
+        for dest in crate::rays::walk_ray(pos, sq, dir) {
+            match pos.board.get(dest) {
+                Some(p) if p.color == color => {}
+                _ => out.push(PieceMove::quiet(sq, dest)),
+            }
+        }
+    }
+    out
+}
+
 pub fn pseudo_legal_moves(pos: &Position) -> Vec<PieceMove> {
     let color = pos.side_to_move;
     let mut out = Vec::new();
@@ -126,7 +139,12 @@ pub fn pseudo_legal_moves(pos: &Position) -> Vec<PieceMove> {
             PieceKind::Pawn => out.extend(pawn_moves(pos, sq, color)),
             PieceKind::Knight => out.extend(leaper_moves(pos, sq, &KNIGHT_OFFSETS, color)),
             PieceKind::King => out.extend(leaper_moves(pos, sq, &KING_OFFSETS, color)),
-            PieceKind::Bishop | PieceKind::Rook | PieceKind::Queen => {} // Task 5
+            PieceKind::Bishop => out.extend(slide_moves(pos, sq, &crate::rays::BISHOP_DIRS, color)),
+            PieceKind::Rook => out.extend(slide_moves(pos, sq, &crate::rays::ROOK_DIRS, color)),
+            PieceKind::Queen => {
+                out.extend(slide_moves(pos, sq, &crate::rays::ROOK_DIRS, color));
+                out.extend(slide_moves(pos, sq, &crate::rays::BISHOP_DIRS, color));
+            }
         }
     }
     out
@@ -169,5 +187,15 @@ mod tests {
             Some(Piece { color: Color::White, kind: PieceKind::Pawn }),
         );
         assert_eq!(moves_from(&pos, Square::from_str("e3").unwrap()), vec![Square::from_str("e4").unwrap()]);
+    }
+
+    #[test]
+    fn lone_rook_on_d4_has_fourteen_moves() {
+        let mut pos = Position { board: crate::board::Board::empty(), ..Position::starting() };
+        pos.board.set(
+            Square::from_str("d4").unwrap(),
+            Some(Piece { color: Color::White, kind: PieceKind::Rook }),
+        );
+        assert_eq!(moves_from(&pos, Square::from_str("d4").unwrap()).len(), 14);
     }
 }
