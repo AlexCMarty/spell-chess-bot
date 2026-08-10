@@ -106,4 +106,51 @@ mod tests {
         pos.board.set(Square::from_str("a2").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
         assert!(!dests(&pos, Square::from_str("e1").unwrap()).contains(&Square::from_str("e2").unwrap()));
     }
+
+    #[test]
+    fn vector_2_freeze_immobilizes_the_targeted_piece() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d5").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("h7").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Knight }));
+        pos.side_to_move = Color::Black;
+        pos.fields.push(crate::position::SpellField {
+            square: Square::from_str("d5").unwrap(), owner: Color::White,
+            kind: crate::position::SpellKind::Freeze, expires_after_ply: pos.ply + 1,
+        });
+        assert_eq!(dests(&pos, Square::from_str("d5").unwrap()), Vec::<Square>::new());
+    }
+
+    #[test]
+    fn vector_7_own_freeze_binds_own_piece_same_turn() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("d4").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Knight }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.fields.push(crate::position::SpellField {
+            square: Square::from_str("d4").unwrap(), owner: Color::White,
+            kind: crate::position::SpellKind::Freeze, expires_after_ply: pos.ply + 1,
+        });
+        assert!(dests(&pos, Square::from_str("d4").unwrap()).is_empty());
+        assert!(!dests(&pos, Square::from_str("a1").unwrap()).is_empty());
+    }
+
+    #[test]
+    fn vector_6_frozen_piece_still_blocks_and_is_capturable() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d5").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Knight }));
+        pos.fields.push(crate::position::SpellField {
+            square: Square::from_str("d5").unwrap(), owner: Color::Black,
+            kind: crate::position::SpellKind::Freeze, expires_after_ply: pos.ply + 1,
+        });
+        let rook_dests = dests(&pos, Square::from_str("d1").unwrap());
+        assert!(rook_dests.contains(&Square::from_str("d5").unwrap()));
+        assert!(!rook_dests.contains(&Square::from_str("d6").unwrap()));
+    }
 }

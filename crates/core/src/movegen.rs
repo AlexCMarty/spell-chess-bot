@@ -130,6 +130,9 @@ fn castle_moves(pos: &Position, color: Color) -> Vec<PieceMove> {
     let mut out = Vec::new();
     let rank = if color == Color::White { 0 } else { 7 };
     let king_sq = Square::new(4, rank);
+    if crate::spells::is_square_frozen(pos, king_sq) {
+        return out;
+    }
     if pos.board.get(king_sq) != Some(Piece { color, kind: PieceKind::King }) {
         return out;
     }
@@ -145,6 +148,7 @@ fn castle_moves(pos: &Position, color: Color) -> Vec<PieceMove> {
         && pos.board.get(Square::new(5, rank)).is_none()
         && pos.board.get(Square::new(6, rank)).is_none()
         && rook_at(Square::new(7, rank))
+        && !crate::spells::is_square_frozen(pos, Square::new(7, rank))
         && !attacked(Square::new(4, rank)) && !attacked(Square::new(5, rank)) && !attacked(Square::new(6, rank))
     {
         out.push(PieceMove { from: king_sq, to: Square::new(6, rank), promotion: None, is_en_passant: false, is_castle: true });
@@ -154,6 +158,7 @@ fn castle_moves(pos: &Position, color: Color) -> Vec<PieceMove> {
         && pos.board.get(Square::new(2, rank)).is_none()
         && pos.board.get(Square::new(1, rank)).is_none()
         && rook_at(Square::new(0, rank))
+        && !crate::spells::is_square_frozen(pos, Square::new(0, rank))
         && !attacked(Square::new(4, rank)) && !attacked(Square::new(3, rank)) && !attacked(Square::new(2, rank))
     {
         out.push(PieceMove { from: king_sq, to: Square::new(2, rank), promotion: None, is_en_passant: false, is_castle: true });
@@ -171,6 +176,9 @@ pub fn pseudo_legal_moves(pos: &Position) -> Vec<PieceMove> {
             Some(p) if p.color == color => p,
             _ => continue,
         };
+        if crate::spells::is_square_frozen(pos, sq) {
+            continue;
+        }
         match piece.kind {
             PieceKind::Pawn => out.extend(pawn_moves(pos, sq, color)),
             PieceKind::Knight => out.extend(leaper_moves(pos, sq, &KNIGHT_OFFSETS, color)),
