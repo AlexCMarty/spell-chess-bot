@@ -30,6 +30,17 @@ pub fn freeze_targets(pos: &Position, color: Color) -> Vec<Square> {
     (0..64).map(Square).collect()
 }
 
+pub fn is_square_jump_active(pos: &Position, square: Square) -> bool {
+    pos.fields.iter().any(|f| f.kind == SpellKind::Jump && field_active(pos, f) && f.square == square)
+}
+
+pub fn jump_targets(pos: &Position, color: Color) -> Vec<Square> {
+    if !pos.spells(color).jump.castable() {
+        return Vec::new();
+    }
+    (0..64).map(Square).filter(|&sq| pos.board.get(sq).is_some()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

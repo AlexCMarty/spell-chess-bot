@@ -89,7 +89,8 @@ fn pawn_moves(pos: &Position, sq: Square, color: Color) -> Vec<PieceMove> {
     if r == start_rank {
         let mid = at(r + dir);
         let landing = at(r + 2 * dir);
-        if pos.board.get(mid).is_none() && pos.board.get(landing).is_none() {
+        let mid_passable = pos.board.get(mid).is_none() || crate::spells::is_square_jump_active(pos, mid);
+        if mid_passable && pos.board.get(landing).is_none() {
             out.push(PieceMove::quiet(sq, landing));
         }
     }

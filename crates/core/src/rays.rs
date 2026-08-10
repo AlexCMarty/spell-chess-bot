@@ -18,7 +18,7 @@ pub fn walk_ray(pos: &Position, from: Square, dir: (i8, i8)) -> Vec<Square> {
         }
         let sq = Square::new(f as u8, r as u8);
         out.push(sq);
-        if pos.board.get(sq).is_some() {
+        if pos.board.get(sq).is_some() && !crate::spells::is_square_jump_active(pos, sq) {
             break;
         }
     }
