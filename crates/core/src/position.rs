@@ -1,7 +1,7 @@
 use crate::board::Board;
 use crate::types::{Color, Square};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CastleRights {
     pub white_kingside: bool,
     pub white_queenside: bool,
@@ -15,13 +15,13 @@ impl CastleRights {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SpellKind {
     Freeze,
     Jump,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SpellCounter {
     pub count: u8,
     pub lock: u8,
@@ -33,7 +33,7 @@ impl SpellCounter {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SpellState {
     pub freeze: SpellCounter,
     pub jump: SpellCounter,
@@ -48,7 +48,7 @@ impl SpellState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SpellField {
     pub square: Square,
     pub owner: Color,
@@ -57,7 +57,7 @@ pub struct SpellField {
     pub expires_after_ply: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Position {
     pub board: Board,
     pub side_to_move: Color,

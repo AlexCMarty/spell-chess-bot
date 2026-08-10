@@ -1,0 +1,7 @@
+[package]
+name = "spellchess-search"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+spellchess-core = { path = "../core" }

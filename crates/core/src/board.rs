@@ -1,6 +1,6 @@
 use crate::types::{Color, Piece, PieceKind, Square};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Board {
     squares: [Option<Piece>; 64],
 }
