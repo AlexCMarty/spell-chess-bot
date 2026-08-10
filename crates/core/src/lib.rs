@@ -14,3 +14,6 @@ pub use movegen::{PieceMove, Promotion, pseudo_legal_moves};
 
 pub mod attacks;
 pub use attacks::is_square_attacked;
+
+pub mod legal;
+pub use legal::{apply_move_only, legal_moves};
