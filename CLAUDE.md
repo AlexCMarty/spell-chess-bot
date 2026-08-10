@@ -26,6 +26,11 @@ disagree, code wins.
   produce a legal move.
 - Spell counts never replenish; only the cooldown resets.
 
+## Commits
+
+You MUST use [Conventional Commits](https://www.conventionalcommits.org/) for every commit
+message (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`, etc.).
+
 ### Engine bundle
 
 `research/variants.js` / `research/variants.pretty.js` are chess.com's own client engine, used
