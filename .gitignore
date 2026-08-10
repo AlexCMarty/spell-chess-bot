@@ -1,0 +1,4 @@
+# chess.com client engine bundle — third-party copyrighted code, not ours to
+# redistribute. Keep locally for reverse-engineering/testing only.
+research/variants.js
+research/variants.pretty.js
