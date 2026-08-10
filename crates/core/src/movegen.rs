@@ -126,9 +126,45 @@ fn slide_moves(pos: &Position, sq: Square, dirs: &[(i8, i8)], color: Color) -> V
     out
 }
 
+fn castle_moves(pos: &Position, color: Color) -> Vec<PieceMove> {
+    let mut out = Vec::new();
+    let rank = if color == Color::White { 0 } else { 7 };
+    let king_sq = Square::new(4, rank);
+    if pos.board.get(king_sq) != Some(Piece { color, kind: PieceKind::King }) {
+        return out;
+    }
+    let (kingside_right, queenside_right) = match color {
+        Color::White => (pos.castle_rights.white_kingside, pos.castle_rights.white_queenside),
+        Color::Black => (pos.castle_rights.black_kingside, pos.castle_rights.black_queenside),
+    };
+    let enemy = color.opposite();
+    let attacked = |sq: Square| crate::attacks::is_square_attacked(pos, sq, enemy);
+    let rook_at = |sq: Square| pos.board.get(sq) == Some(Piece { color, kind: PieceKind::Rook });
+
+    if kingside_right
+        && pos.board.get(Square::new(5, rank)).is_none()
+        && pos.board.get(Square::new(6, rank)).is_none()
+        && rook_at(Square::new(7, rank))
+        && !attacked(Square::new(4, rank)) && !attacked(Square::new(5, rank)) && !attacked(Square::new(6, rank))
+    {
+        out.push(PieceMove { from: king_sq, to: Square::new(6, rank), promotion: None, is_en_passant: false, is_castle: true });
+    }
+    if queenside_right
+        && pos.board.get(Square::new(3, rank)).is_none()
+        && pos.board.get(Square::new(2, rank)).is_none()
+        && pos.board.get(Square::new(1, rank)).is_none()
+        && rook_at(Square::new(0, rank))
+        && !attacked(Square::new(4, rank)) && !attacked(Square::new(3, rank)) && !attacked(Square::new(2, rank))
+    {
+        out.push(PieceMove { from: king_sq, to: Square::new(2, rank), promotion: None, is_en_passant: false, is_castle: true });
+    }
+    out
+}
+
 pub fn pseudo_legal_moves(pos: &Position) -> Vec<PieceMove> {
     let color = pos.side_to_move;
     let mut out = Vec::new();
+    out.extend(castle_moves(pos, color));
     for i in 0..64 {
         let sq = Square(i);
         let piece: Piece = match pos.board.get(sq) {
@@ -197,5 +233,26 @@ mod tests {
             Some(Piece { color: Color::White, kind: PieceKind::Rook }),
         );
         assert_eq!(moves_from(&pos, Square::from_str("d4").unwrap()).len(), 14);
+    }
+
+    #[test]
+    fn both_castles_available_on_clear_back_rank() {
+        let mut pos = Position { board: crate::board::Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("h1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        let dests = moves_from(&pos, Square::from_str("e1").unwrap());
+        assert!(dests.contains(&Square::from_str("g1").unwrap()));
+        assert!(dests.contains(&Square::from_str("c1").unwrap()));
+    }
+
+    #[test]
+    fn castling_blocked_when_king_passes_through_check() {
+        let mut pos = Position { board: crate::board::Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("h1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("f8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
+        let dests = moves_from(&pos, Square::from_str("e1").unwrap());
+        assert!(!dests.contains(&Square::from_str("g1").unwrap()));
     }
 }
