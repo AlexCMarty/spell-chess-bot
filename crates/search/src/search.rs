@@ -76,6 +76,9 @@ mod tests {
         pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
         pos.board.set(Square::from_str("b4").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Bishop }));
         pos.side_to_move = Color::Black;
+        pos.black_spells.freeze.count = 0; // isolate the jump-enabled king capture: without this, freeze@d2
+                                            // also freezes White's king (d2's 3x3 zone includes e1) and Bxd2
+                                            // delivers an independent, equally-winning checkmate that ties.
         let (turn, _score) = best_turn(&pos, 1).expect("a move must be found");
         assert_eq!(turn.mv.to, Square::from_str("e1").unwrap());
         assert!(turn.spell.is_some());
