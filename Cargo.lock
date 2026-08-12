@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "spellchess-cli"
+version = "0.1.0"
+dependencies = [
+ "spellchess-core",
+ "spellchess-search",
+]
+
+[[package]]
 name = "spellchess-core"
 version = "0.1.0"
 
