@@ -1,6 +1,16 @@
 use spellchess_core::{apply_turn, game_status, GameStatus, Position};
 use crate::notation::parse_turn;
 use crate::render::render_board;
+use spellchess_search::search::{search as run_search, Budget};
+
+fn parse_budget(rest: &str) -> Budget {
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    match parts.as_slice() {
+        ["--depth", n] => n.parse().map(Budget::Depth).unwrap_or(Budget::Time(std::time::Duration::from_secs(5))),
+        ["--time", n] => n.parse().map(|s| Budget::Time(std::time::Duration::from_secs(s))).unwrap_or(Budget::Time(std::time::Duration::from_secs(5))),
+        _ => Budget::Time(std::time::Duration::from_secs(5)),
+    }
+}
 
 pub struct Session {
     pub pos: Position,
@@ -34,6 +44,7 @@ impl Session {
                 self.history.clear();
                 format!("new game, you are {}", if line.ends_with("black") { "black" } else { "white" })
             }
+            line if line == "go" || line.starts_with("go ") => self.handle_go(line),
             other => self.apply_turn_command(other),
         }
     }
@@ -51,6 +62,15 @@ impl Session {
                 }
             }
             Err(e) => format!("error: {e}"),
+        }
+    }
+
+    fn handle_go(&self, line: &str) -> String {
+        let rest = line.strip_prefix("go").unwrap_or("").trim();
+        let budget = parse_budget(rest);
+        match run_search(&self.pos, budget) {
+            Some((turn, score)) => format!("suggest: {} (eval {})", crate::notation::format_turn(&turn), score),
+            None => "no legal turn available".to_string(),
         }
     }
 }
@@ -106,5 +126,27 @@ mod tests {
         });
         session.pos.side_to_move = Color::Black;
         assert_eq!(session.status(), GameStatus::Checkmate(Color::White));
+    }
+
+    #[test]
+    fn go_returns_a_legal_suggestion() {
+        let mut session = Session::new();
+        // Use a minimal position instead of the full board: Position::starting() at depth >= 1 is
+        // combinatorially intractable in debug builds due to unfiltered freeze/jump target
+        // enumeration (Tasks 9/11). This test only needs to prove the `handle_go` wiring works
+        // correctly and returns a legal move; it doesn't need to stress-test a full board.
+        session.pos = Position { board: Board::empty(), ..Position::starting() };
+        session.pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        session.pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        session.pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        session.pos.white_spells = spellchess_core::SpellState {
+            freeze: spellchess_core::SpellCounter { count: 0, lock: 0 },
+            jump: spellchess_core::SpellCounter { count: 0, lock: 0 },
+        };
+        session.pos.black_spells = session.pos.white_spells;
+        let output = session.handle_go("go --depth 2");
+        assert!(output.starts_with("suggest: "));
+        let mv_str = output.strip_prefix("suggest: ").unwrap().split(" (eval").next().unwrap();
+        assert!(crate::notation::parse_turn(mv_str, &session.pos).is_ok());
     }
 }
