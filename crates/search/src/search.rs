@@ -1,6 +1,8 @@
 use std::time::{Duration, Instant};
 use spellchess_core::{apply_turn, generate_turns, Position, Turn};
 use crate::eval::evaluate;
+use crate::tt::{Bound, TranspositionTable, TtEntry};
+use crate::zobrist::hash_position;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Budget {
@@ -9,15 +11,31 @@ pub enum Budget {
 }
 
 pub fn negamax(pos: &Position, depth: u32) -> i32 {
-    let turns = generate_turns(pos);
+    let mut tt = TranspositionTable::new();
+    alphabeta(pos, depth, i32::MIN + 1, i32::MAX - 1, &mut tt)
+}
 
-    // King-capture terminal: the side to move has no king. Doesn't require
-    // turns to be empty (the other side's remaining pieces can still move).
+fn alphabeta(pos: &Position, depth: u32, mut alpha: i32, beta: i32, tt: &mut TranspositionTable) -> i32 {
+    // King-capture terminal: cheap check, no move generation needed, checked
+    // before the (comparatively expensive) TT hash so this fast path stays fast.
     let king_sq = match pos.board.king_square(pos.side_to_move) {
         Some(sq) => sq,
         None => return i32::MIN + 1, // loss for the side to move
     };
 
+    let key = hash_position(pos);
+    if let Some(entry) = tt.get(key) {
+        if entry.depth >= depth {
+            match entry.bound {
+                Bound::Exact => return entry.score,
+                Bound::Lower if entry.score >= beta => return entry.score,
+                Bound::Upper if entry.score <= alpha => return entry.score,
+                _ => {}
+            }
+        }
+    }
+
+    let turns = generate_turns(pos);
     if turns.is_empty() {
         // No legal turns: checkmate or stalemate. We already have king_sq,
         // so this is one attack check, not a second generate_turns call.
@@ -32,14 +50,25 @@ pub fn negamax(pos: &Position, depth: u32) -> i32 {
         return evaluate(pos);
     }
 
-    let mut best = i32::MIN;
-    for turn in turns {
+    let ordered = crate::ordering::order_turns(pos, turns);
+    let mut best = i32::MIN + 1;
+    let original_alpha = alpha;
+    for turn in ordered {
         let next = apply_turn(pos, &turn);
-        let score = negamax(&next, depth - 1).saturating_neg();
+        let score = -alphabeta(&next, depth - 1, -beta, -alpha, tt);
         if score > best {
             best = score;
         }
+        if best > alpha {
+            alpha = best;
+        }
+        if alpha >= beta {
+            break;
+        }
     }
+
+    let bound = if best <= original_alpha { Bound::Upper } else if best >= beta { Bound::Lower } else { Bound::Exact };
+    tt.insert(key, TtEntry { depth, score: best, bound });
     best
 }
 
@@ -155,5 +184,18 @@ mod tests {
         let result = search(&pos, Budget::Time(std::time::Duration::from_millis(200)));
         assert!(result.is_some());
         assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn alpha_beta_agrees_with_task_18_mate_in_one() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("g8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("f7").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("g7").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("h7").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        let (turn, _) = best_turn(&pos, 1).expect("a move must be found");
+        assert_eq!(turn.mv.to, Square::from_str("a8").unwrap());
     }
 }
