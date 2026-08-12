@@ -59,21 +59,52 @@ fn jump_threat_bonus(pos: &Position, color: Color) -> i32 {
             Some(p) if p.color == color && matches!(p.kind, PieceKind::Bishop | PieceKind::Rook | PieceKind::Queen) => p,
             _ => continue,
         };
-        let dirs: &[(i8, i8)] = match piece.kind {
-            PieceKind::Rook => &spellchess_core::rays::ROOK_DIRS,
-            PieceKind::Bishop => &spellchess_core::rays::BISHOP_DIRS,
-            PieceKind::Queen => continue, // queen direction covered by rook+bishop cases on other pieces; simple v1 approximation
-            _ => continue,
-        };
-        for &dir in dirs {
-            let ray = spellchess_core::rays::walk_ray(pos, sq, dir);
-            let blockers: Vec<Square> = ray.iter().copied().filter(|&s| pos.board.get(s).is_some()).collect();
-            if blockers.len() == 1 && ray.last() == Some(&enemy_king) {
-                return 60;
+        let hits = match piece.kind {
+            PieceKind::Rook => slider_threatens_through_one_blocker(pos, sq, enemy_king, &spellchess_core::rays::ROOK_DIRS),
+            PieceKind::Bishop => slider_threatens_through_one_blocker(pos, sq, enemy_king, &spellchess_core::rays::BISHOP_DIRS),
+            PieceKind::Queen => {
+                slider_threatens_through_one_blocker(pos, sq, enemy_king, &spellchess_core::rays::ROOK_DIRS)
+                    || slider_threatens_through_one_blocker(pos, sq, enemy_king, &spellchess_core::rays::BISHOP_DIRS)
             }
+            _ => false,
+        };
+        if hits {
+            return 60;
         }
     }
     0
+}
+
+/// Walks the full ray from `from` in each of `dirs` (ignoring `walk_ray`'s stop-at-first-
+/// blocker behavior, since we need to see past exactly one blocker to the king behind it).
+/// Returns true if `king` lies on one of these rays with exactly one occupied square
+/// between `from` and `king` — the pattern a single jump cast on that blocker would clear.
+fn slider_threatens_through_one_blocker(pos: &Position, from: Square, king: Square, dirs: &[(i8, i8)]) -> bool {
+    for &dir in dirs {
+        let (mut f, mut r) = (from.file() as i8, from.rank() as i8);
+        let mut blockers = 0;
+        loop {
+            f += dir.0;
+            r += dir.1;
+            if !(0..8).contains(&f) || !(0..8).contains(&r) {
+                break;
+            }
+            let sq = Square::new(f as u8, r as u8);
+            if sq == king {
+                if blockers == 1 {
+                    return true;
+                }
+                break;
+            }
+            if pos.board.get(sq).is_some() {
+                blockers += 1;
+                if blockers > 1 {
+                    break; // more than one blocker: no single jump clears this line
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Score from the perspective of `pos.side_to_move`: positive is good for the side to move.
