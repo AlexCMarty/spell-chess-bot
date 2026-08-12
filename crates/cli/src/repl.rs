@@ -94,8 +94,7 @@ mod tests {
         let mut session = Session::new();
         session.pos = Position { board: Board::empty(), ..Position::starting() };
         session.pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
-        session.pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
-        session.pos.board.set(Square::from_str("h1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        session.pos.board.set(Square::from_str("e2").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
         session.pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
         session.pos.black_spells = spellchess_core::SpellState {
             freeze: spellchess_core::SpellCounter { count: 0, lock: 0 },
@@ -106,6 +105,6 @@ mod tests {
             kind: spellchess_core::SpellKind::Freeze, expires_after_ply: session.pos.ply + 1,
         });
         session.pos.side_to_move = Color::Black;
-        assert_eq!(session.status(), GameStatus::Stalemate);
+        assert_eq!(session.status(), GameStatus::Checkmate(Color::White));
     }
 }
