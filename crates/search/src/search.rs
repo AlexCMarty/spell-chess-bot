@@ -1,5 +1,12 @@
+use std::time::{Duration, Instant};
 use spellchess_core::{apply_turn, generate_turns, Position, Turn};
 use crate::eval::evaluate;
+
+#[derive(Debug, Clone, Copy)]
+pub enum Budget {
+    Depth(u32),
+    Time(Duration),
+}
 
 pub fn negamax(pos: &Position, depth: u32) -> i32 {
     let turns = generate_turns(pos);
@@ -49,6 +56,43 @@ pub fn best_turn(pos: &Position, depth: u32) -> Option<(Turn, i32)> {
     best
 }
 
+pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
+    let start = Instant::now();
+    let max_depth = match budget {
+        Budget::Depth(d) => d,
+        Budget::Time(_) => 64,
+    };
+    let mut best: Option<(Turn, i32)> = None;
+    for depth in 1..=max_depth {
+        if let Budget::Time(limit) = budget {
+            if start.elapsed() >= limit {
+                break;
+            }
+        }
+        let turns = crate::ordering::order_turns(pos, generate_turns(pos));
+        if turns.is_empty() {
+            break;
+        }
+        let mut iter_best: Option<(Turn, i32)> = None;
+        for turn in turns {
+            let next = apply_turn(pos, &turn);
+            let score = -negamax(&next, depth.saturating_sub(1));
+            if iter_best.map_or(true, |(_, b)| score > b) {
+                iter_best = Some((turn, score));
+            }
+            if let Budget::Time(limit) = budget {
+                if start.elapsed() >= limit {
+                    break;
+                }
+            }
+        }
+        if iter_best.is_some() {
+            best = iter_best;
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +126,34 @@ mod tests {
         let (turn, _score) = best_turn(&pos, 1).expect("a move must be found");
         assert_eq!(turn.mv.to, Square::from_str("e1").unwrap());
         assert!(turn.spell.is_some());
+    }
+
+    #[test]
+    fn depth_budget_returns_a_move() {
+        // A minimal, spell-free position: Position::starting() at Budget::Depth(2) is
+        // combinatorially intractable pre-alpha-beta (freeze/jump target enumeration is
+        // unfiltered per Tasks 9/11 — see the ledger). This test only needs to prove the
+        // iterative-deepening loop in `search()` completes correctly across 2 plies; it
+        // doesn't need to stress-test a fully-populated board (that's Task 20's job, once
+        // pruning exists).
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.white_spells = spellchess_core::SpellState {
+            freeze: spellchess_core::SpellCounter { count: 0, lock: 0 },
+            jump: spellchess_core::SpellCounter { count: 0, lock: 0 },
+        };
+        pos.black_spells = pos.white_spells;
+        assert!(search(&pos, Budget::Depth(2)).is_some());
+    }
+
+    #[test]
+    fn time_budget_returns_within_the_budget() {
+        let pos = Position::starting();
+        let start = std::time::Instant::now();
+        let result = search(&pos, Budget::Time(std::time::Duration::from_millis(200)));
+        assert!(result.is_some());
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
     }
 }
