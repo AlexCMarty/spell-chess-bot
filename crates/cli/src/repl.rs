@@ -3,12 +3,25 @@ use crate::notation::parse_turn;
 use crate::render::render_board;
 use spellchess_search::search::{search as run_search, Budget};
 
-fn parse_budget(rest: &str) -> Budget {
+const DEFAULT_GO_TIME: std::time::Duration = std::time::Duration::from_secs(5);
+const GO_USAGE: &str = "usage: go | go --depth N | go --time SECONDS";
+
+/// Parses `go`'s arguments. Malformed input is an error rather than a silent
+/// fallback to the default budget: quietly running a different search than the
+/// one asked for is worse than saying so.
+fn parse_budget(rest: &str) -> Result<Budget, String> {
     let parts: Vec<&str> = rest.split_whitespace().collect();
     match parts.as_slice() {
-        ["--depth", n] => n.parse().map(Budget::Depth).unwrap_or(Budget::Time(std::time::Duration::from_secs(5))),
-        ["--time", n] => n.parse().map(|s| Budget::Time(std::time::Duration::from_secs(s))).unwrap_or(Budget::Time(std::time::Duration::from_secs(5))),
-        _ => Budget::Time(std::time::Duration::from_secs(5)),
+        [] => Ok(Budget::Time(DEFAULT_GO_TIME)),
+        ["--depth", n] => n
+            .parse()
+            .map(Budget::Depth)
+            .map_err(|_| format!("bad --depth value {n:?}: expected a whole number of plies. {GO_USAGE}")),
+        ["--time", n] => n
+            .parse()
+            .map(|s| Budget::Time(std::time::Duration::from_secs(s)))
+            .map_err(|_| format!("bad --time value {n:?}: expected a whole number of seconds. {GO_USAGE}")),
+        _ => Err(format!("unrecognized go arguments {rest:?}. {GO_USAGE}")),
     }
 }
 
@@ -67,7 +80,10 @@ impl Session {
 
     fn handle_go(&self, line: &str) -> String {
         let rest = line.strip_prefix("go").unwrap_or("").trim();
-        let budget = parse_budget(rest);
+        let budget = match parse_budget(rest) {
+            Ok(b) => b,
+            Err(e) => return format!("error: {e}"),
+        };
         match run_search(&self.pos, budget) {
             Some((turn, score)) => format!("suggest: {} (eval {})", crate::notation::format_turn(&turn), score),
             None => "no legal turn available".to_string(),
@@ -126,6 +142,21 @@ mod tests {
         });
         session.pos.side_to_move = Color::Black;
         assert_eq!(session.status(), GameStatus::Checkmate(Color::White));
+    }
+
+    #[test]
+    fn bare_go_uses_the_five_second_default() {
+        assert!(matches!(parse_budget(""), Ok(Budget::Time(d)) if d == std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn malformed_go_arguments_are_reported_not_silently_defaulted() {
+        for bad in ["--depth abc", "--depth", "--nonsense", "--time later", "--depth 2 --time 3"] {
+            assert!(parse_budget(bad).is_err(), "expected `go {bad}` to be rejected");
+        }
+        let mut session = Session::new();
+        let out = session.handle_command("go --depth abc");
+        assert!(out.starts_with("error:"), "expected an error message, got {out:?}");
     }
 
     #[test]
