@@ -1,0 +1,12 @@
+[package]
+name = "spellchess-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+spellchess-core = { path = "../core" }
+spellchess-search = { path = "../search" }
+
+[[bin]]
+name = "spellchess"
+path = "src/main.rs"
