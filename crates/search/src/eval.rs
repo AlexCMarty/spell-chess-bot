@@ -22,12 +22,20 @@ pub fn piece_value(kind: PieceKind) -> i32 {
     }
 }
 
+/// Mirrors a square index across the board's horizontal midline, so a Black
+/// piece is scored against White's piece-square table from Black's point of
+/// view. `i ^ 56` flips only the rank bits of a `rank * 8 + file` index; the
+/// tempting `63 - i` is a full 180 degree rotation that flips the file too.
+fn mirror_rank(i: u8) -> usize {
+    (i ^ 56) as usize
+}
+
 fn positional(pos: &Position) -> i32 {
     let mut score = 0i32;
     for i in 0..64u8 {
         if let Some(p) = pos.board.get(Square(i)) {
             if p.kind == PieceKind::Knight {
-                let idx = if p.color == Color::White { i as usize } else { 63 - i as usize };
+                let idx = if p.color == Color::White { i as usize } else { mirror_rank(i) };
                 score += if p.color == Color::White { KNIGHT_PST[idx] } else { -KNIGHT_PST[idx] };
             }
         }
@@ -139,6 +147,18 @@ mod tests {
     #[test]
     fn start_position_is_balanced() {
         assert_eq!(evaluate(&Position::starting()), 0);
+    }
+
+    #[test]
+    fn mirror_rank_flips_the_rank_and_keeps_the_file() {
+        // a1 <-> a8, h1 <-> h8, b2 <-> b7: file preserved, rank reflected.
+        // A 180 degree rotation (`63 - i`) would send a1 to h8 instead.
+        for (sq, mirrored) in [("a1", "a8"), ("h1", "h8"), ("b2", "b7"), ("g3", "g6"), ("e4", "e5")] {
+            let from = Square::from_str(sq).unwrap();
+            let to = Square::from_str(mirrored).unwrap();
+            assert_eq!(mirror_rank(from.0), to.0 as usize, "{sq} should mirror to {mirrored}");
+            assert_eq!(mirror_rank(to.0), from.0 as usize, "{mirrored} should mirror back to {sq}");
+        }
     }
 
     #[test]
