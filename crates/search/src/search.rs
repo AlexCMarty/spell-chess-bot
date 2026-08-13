@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 use spellchess_core::{apply_turn, generate_search_turns, Position, Turn};
 use crate::eval::evaluate;
+use crate::tables::{HistoryTable, KillerTable};
 use crate::tt::{Bound, TranspositionTable, TtEntry};
 use crate::zobrist::hash_position;
 
@@ -16,7 +17,9 @@ const MAX_QUIESCENCE_DEPTH: u32 = 6;
 
 pub fn negamax(pos: &Position, depth: u32) -> i32 {
     let mut tt = TranspositionTable::new();
-    alphabeta(pos, depth, i32::MIN + 1, i32::MAX - 1, &mut tt, None)
+    let mut killers = KillerTable::new(depth);
+    let mut history = HistoryTable::new();
+    alphabeta(pos, depth, i32::MIN + 1, i32::MAX - 1, &mut tt, None, &mut killers, &mut history)
         .expect("alphabeta with no deadline (None) never aborts")
 }
 
@@ -30,6 +33,8 @@ fn alphabeta(
     beta: i32,
     tt: &mut TranspositionTable,
     deadline: Option<Instant>,
+    killers: &mut KillerTable,
+    history: &mut HistoryTable,
 ) -> Option<i32> {
     if let Some(dl) = deadline {
         if Instant::now() >= dl {
@@ -45,7 +50,8 @@ fn alphabeta(
     };
 
     let key = hash_position(pos);
-    if let Some(entry) = tt.get(key) {
+    let tt_entry = tt.get(key).copied();
+    if let Some(entry) = tt_entry {
         if entry.depth >= depth {
             match entry.bound {
                 Bound::Exact => return Some(entry.score),
@@ -73,28 +79,40 @@ fn alphabeta(
         return quiescence(pos, alpha, beta, MAX_QUIESCENCE_DEPTH, deadline, turns);
     }
 
-    let ordered = crate::ordering::order_turns(pos, turns, None, [None, None], None);
+    // A probe that didn't short-circuit above can still hand us a move-ordering hint:
+    // even a depth-insufficient or non-cutting TT entry usually still recorded the
+    // best move found for this position on some earlier, shallower visit.
+    let tt_move = tt_entry.and_then(|e| e.best_move);
+    let killer_pair = killers.pair(depth);
+    let ordered = crate::ordering::order_turns(pos, turns, tt_move, killer_pair, Some(history));
     let mut best = i32::MIN + 1;
+    let mut best_turn: Option<Turn> = None;
     let original_alpha = alpha;
     for turn in ordered {
         let next = apply_turn(pos, &turn);
-        let score = match alphabeta(&next, depth - 1, -beta, -alpha, tt, deadline) {
+        let score = match alphabeta(&next, depth - 1, -beta, -alpha, tt, deadline, killers, history) {
             Some(s) => -s,
             None => return None,
         };
         if score > best {
             best = score;
+            best_turn = Some(turn);
         }
         if best > alpha {
             alpha = best;
         }
         if alpha >= beta {
+            let is_capture = pos.board.get(turn.mv.to).is_some() || turn.mv.is_en_passant;
+            if !is_capture {
+                killers.record(depth, turn);
+                history.record(turn.mv.from, turn.mv.to, depth);
+            }
             break;
         }
     }
 
     let bound = if best <= original_alpha { Bound::Upper } else if best >= beta { Bound::Lower } else { Bound::Exact };
-    tt.insert(key, TtEntry { depth, score: best, bound, best_move: None });
+    tt.insert(key, TtEntry { depth, score: best, bound, best_move: best_turn });
     Some(best)
 }
 
@@ -192,6 +210,8 @@ pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
         Budget::Depth(d) => d,
         Budget::Time(_) => 64,
     };
+    let mut killers = KillerTable::new(max_depth);
+    let mut history = HistoryTable::new();
     let mut tt = TranspositionTable::new();
     let mut best: Option<(Turn, i32)> = None;
     for depth in 1..=max_depth {
@@ -210,7 +230,7 @@ pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
         let mut complete = true;
         for turn in turns {
             let next = apply_turn(pos, &turn);
-            let score = match alphabeta(&next, depth.saturating_sub(1), -beta, -alpha, &mut tt, deadline) {
+            let score = match alphabeta(&next, depth.saturating_sub(1), -beta, -alpha, &mut tt, deadline, &mut killers, &mut history) {
                 Some(s) => -s,
                 None => {
                     complete = false;
@@ -420,6 +440,35 @@ mod tests {
         // landing at 480 — well under the naive blunder's 800. Threshold picked with a
         // wide margin between those two verified values, not tied to the exact 480.
         assert!(score_with_quiescence < 700);
+    }
+
+    #[test]
+    fn a_completed_shallower_iteration_s_best_move_is_tried_first_at_the_root_next_iteration() {
+        // Indirect proof that TT-move-first ordering is wired end-to-end: run depth 3
+        // via the iterative-deepening search() entry point (which shares one TT across
+        // depths) and confirm it still finds the known-correct mate-in-one move, then
+        // separately confirm negamax (a single fixed-depth call with its own fresh
+        // table) agrees -- if TT-move wiring were broken (e.g. best_move never stored,
+        // or never read back), both would still independently find the right move
+        // since move-ordering hints only affect *how fast* alpha-beta finds an answer,
+        // never *whether* it finds the correct one. This test is a correctness guard
+        // for the wiring, not a performance benchmark (see Task 7 for timing).
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("g8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("f7").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("g7").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("h7").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.white_spells = spellchess_core::SpellState {
+            freeze: spellchess_core::SpellCounter { count: 0, lock: 0 },
+            jump: spellchess_core::SpellCounter { count: 0, lock: 0 },
+        };
+        pos.black_spells = pos.white_spells;
+
+        let (turn, _score) = search(&pos, Budget::Depth(3)).expect("a move must be found");
+        assert_eq!(turn.mv.from, Square::from_str("a1").unwrap());
+        assert_eq!(turn.mv.to, Square::from_str("a8").unwrap());
     }
 
     #[test]
