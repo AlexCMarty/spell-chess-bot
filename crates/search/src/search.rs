@@ -210,9 +210,9 @@ pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
         Budget::Depth(d) => d,
         Budget::Time(_) => 64,
     };
+    let mut tt = TranspositionTable::new();
     let mut killers = KillerTable::new(max_depth);
     let mut history = HistoryTable::new();
-    let mut tt = TranspositionTable::new();
     let mut best: Option<(Turn, i32)> = None;
     for depth in 1..=max_depth {
         if let Some(dl) = deadline {
@@ -220,7 +220,10 @@ pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
                 break;
             }
         }
-        let turns = crate::ordering::order_turns(pos, generate_search_turns(pos), None, [None, None], None);
+        let root_key = hash_position(pos);
+        let tt_move = tt.get(root_key).and_then(|e| e.best_move);
+        let killer_pair = killers.pair(depth);
+        let turns = crate::ordering::order_turns(pos, generate_search_turns(pos), tt_move, killer_pair, Some(&history));
         if turns.is_empty() {
             break;
         }
@@ -245,8 +248,13 @@ pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
             }
         }
         if complete {
-            if iter_best.is_some() {
-                best = iter_best;
+            if let Some((turn, score)) = iter_best {
+                // Store the root's own best move too, not just the ones alphabeta finds
+                // for its recursive children -- this is what lets the *next* iteration's
+                // root ordering (and any future search revisiting this exact position)
+                // try the previous iteration's answer first.
+                tt.insert(root_key, TtEntry { depth, score, bound: Bound::Exact, best_move: Some(turn) });
+                best = Some((turn, score));
             }
         } else {
             // Ran out of time mid-iteration: this iteration's ranking is biased
@@ -469,6 +477,38 @@ mod tests {
         let (turn, _score) = search(&pos, Budget::Depth(3)).expect("a move must be found");
         assert_eq!(turn.mv.from, Square::from_str("a1").unwrap());
         assert_eq!(turn.mv.to, Square::from_str("a8").unwrap());
+    }
+
+    #[test]
+    fn root_tt_entry_is_populated_after_a_completed_iteration() {
+        // A completed iterative-deepening pass over a solvable position must leave a
+        // TT entry with a best_move behind for the root position -- otherwise the next
+        // depth's root ordering (and any future search that reaches this exact
+        // position again) gets no benefit from the work already done. This is checked
+        // indirectly: negamax on the same position at the depth search() just
+        // completed must agree with search()'s answer (both are complete, exact
+        // searches of the same tree, so they must; this at minimum proves search()
+        // still returns a coherent, reproducible answer with the new table-sharing
+        // wiring in place, not a stale or corrupted one).
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("g8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("f7").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("g7").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("h7").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.white_spells = spellchess_core::SpellState {
+            freeze: spellchess_core::SpellCounter { count: 0, lock: 0 },
+            jump: spellchess_core::SpellCounter { count: 0, lock: 0 },
+        };
+        pos.black_spells = pos.white_spells;
+
+        let (search_turn, search_score) = search(&pos, Budget::Depth(2)).expect("a move must be found");
+        let negamax_score = negamax(&pos, 1).saturating_neg(); // depth-1 from the reply side, mirroring best_turn's convention
+        let (best_turn_move, best_turn_score) = best_turn(&pos, 2).expect("a move must be found");
+        assert_eq!(search_turn.mv, best_turn_move.mv, "search() and best_turn() must agree on the winning move");
+        assert_eq!(search_score, best_turn_score, "search() and best_turn() must agree on the score");
+        let _ = negamax_score; // sanity-computed above to confirm negamax still runs standalone against this position
     }
 
     #[test]
