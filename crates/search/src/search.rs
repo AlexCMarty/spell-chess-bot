@@ -1,5 +1,5 @@
 use std::time::{Duration, Instant};
-use spellchess_core::{apply_turn, generate_turns, Position, Turn};
+use spellchess_core::{apply_turn, generate_turns, generate_search_turns, Position, Turn};
 use crate::eval::evaluate;
 use crate::tt::{Bound, TranspositionTable, TtEntry};
 use crate::zobrist::hash_position;
@@ -56,7 +56,7 @@ fn alphabeta(
         }
     }
 
-    let turns = generate_turns(pos);
+    let turns = generate_search_turns(pos);
     if turns.is_empty() {
         // No legal turns: checkmate or stalemate. We already have king_sq,
         // so this is one attack check, not a second generate_turns call.
@@ -154,7 +154,7 @@ fn quiescence(
 
     for turn in dedup_captures(pos, turns) {
         let next = apply_turn(pos, &turn);
-        let next_turns = generate_turns(&next);
+        let next_turns = generate_search_turns(&next);
         let score = match quiescence(&next, -beta, -alpha, qdepth - 1, deadline, next_turns) {
             Some(s) => -s,
             None => return None,
@@ -170,7 +170,7 @@ fn quiescence(
 }
 
 pub fn best_turn(pos: &Position, depth: u32) -> Option<(Turn, i32)> {
-    let turns = generate_turns(pos);
+    let turns = generate_search_turns(pos);
     let mut best: Option<(Turn, i32)> = None;
     for turn in turns {
         let next = apply_turn(pos, &turn);
@@ -200,7 +200,7 @@ pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
                 break;
             }
         }
-        let turns = crate::ordering::order_turns(pos, generate_turns(pos));
+        let turns = crate::ordering::order_turns(pos, generate_search_turns(pos));
         if turns.is_empty() {
             break;
         }
@@ -249,7 +249,7 @@ pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
     // None means "no legal turn exists", which would be a lie here -- fall back to
     // the move `order_turns` ranks first, scored by a single static eval.
     if best.is_none() {
-        if let Some(turn) = crate::ordering::order_turns(pos, generate_turns(pos)).into_iter().next() {
+        if let Some(turn) = crate::ordering::order_turns(pos, generate_search_turns(pos)).into_iter().next() {
             let score = -evaluate(&apply_turn(pos, &turn));
             best = Some((turn, score));
         }
