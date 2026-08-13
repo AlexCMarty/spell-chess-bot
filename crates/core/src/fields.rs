@@ -1,5 +1,4 @@
-use crate::position::{SpellField, SpellKind};
-use crate::types::{Color, Square};
+use crate::position::SpellField;
 
 /// Fixed-capacity, `Copy` replacement for `Vec<SpellField>`. Capacity 4 gives a 2x
 /// margin over the demonstrated momentary maximum of 2 concurrent fields (see
@@ -67,6 +66,9 @@ impl Default for FieldSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::position::SpellKind;
+    use crate::types::{Color, Square};
 
     fn field(square: &str, kind: SpellKind) -> SpellField {
         SpellField { square: Square::from_str(square).unwrap(), owner: Color::White, kind, expires_after_ply: 1 }

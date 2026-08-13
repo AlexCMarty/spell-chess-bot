@@ -1,4 +1,4 @@
-use spellchess_core::{PieceMove, Square, Turn};
+use spellchess_core::{Square, Turn};
 
 /// Two killer-move slots per remaining-depth bucket -- `depth` is the same
 /// remaining-depth parameter already threaded through `alphabeta`, not
@@ -62,6 +62,8 @@ impl HistoryTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use spellchess_core::PieceMove;
 
     fn turn(from: &str, to: &str) -> Turn {
         Turn { spell: None, mv: PieceMove::quiet(Square::from_str(from).unwrap(), Square::from_str(to).unwrap()) }
