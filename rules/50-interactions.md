@@ -32,10 +32,56 @@ escape (see [the escape hatch](#the-spell-escape-hatch)). Standard.
 `[VERIFIED]` A move that captures the enemy king is legal and ends the game immediately.
 Engine notation uses `xK`, e.g. `sanShort: "jump@g5 BxKh4#"`.
 
-**Why this is reachable.** Move legality still forbids leaving *your own* king in check, so
-a player can never simply walk into capture. King capture arises because **a spell cast at
-the start of your turn can create an attack that did not exist during the opponent's turn**.
-They had no opportunity to respond, so the attack is executed rather than answered.
+**Why this is usually reachable this way.** Ordinary (non-capturing) move legality still
+forbids leaving *your own* king in check, so a player can't casually wander into a
+position with the enemy king exposed while ignoring their own. King capture typically
+arises because **a spell cast at the start of your turn can create an attack that did not
+exist during the opponent's turn**. They had no opportunity to respond, so the attack is
+executed rather than answered.
+
+`[VERIFIED]` **A move that captures the enemy king is legal even if the mover's own king is
+simultaneously in check from an unrelated piece, and even if that move does nothing to
+address the check** — as long as it leaves at most one attacker on the mover's own king.
+Measured: White king `a1` in check from Black rook `a8` (clear file); White queen `h8`
+still listed `h1` — Black's king, unrelated to the check — among its legal destinations,
+alongside the expected check-resolving `a8`. This means the "why this is usually reachable"
+framing above describes the common case, not a hard constraint — a king capture that also
+happens to leave the mover's own king in check is legal too, it just doesn't end the
+mover's turn in danger because the game is already over.
+
+`[VERIFIED]` **The precise exception: a king-capturing move is illegal if it *newly*
+increases the mover's own checker count past what it already was (and past one) — not if
+the mover was simply already in that much trouble.** Concretely: if the mover's king is
+already in double check (or worse) *before* the move, an unrelated piece can still capture
+the enemy king freely — the pre-existing double check doesn't disqualify it. But if a piece
+is blocking one attacker (a pin) and capturing the enemy king means moving off that line,
+discovering the blocked attacker's check, **that specific move is illegal if it pushes the
+checker count from single (or none) up past one** — i.e. you may not use a king capture to
+create your own double check from scratch, but you may use one while already sitting in a
+double check you didn't just cause.
+
+Three measurements pin this down:
+
+1. **Pre-existing double check tolerates an unrelated capture.** A dense position with
+   White king `d8` already in check from both Black queen `e8` (adjacent, rank 8) and Black
+   rook `d6` (file d, clear) *before any move* — three unrelated White pieces (`h1` knight,
+   `e2` rook, `f7` rook, none blocking either check) each still listed the Black king on
+   `f2` as their sole legal destination. See `crates/core/tests/fixtures/dense_01.json`.
+2. **A newly-self-discovered single check is fine.** White king `e1`, White knight `e4`
+   (blocking Black rook `e8` along the e-file, no check yet), Black king `d6` (reachable by
+   the knight), nothing else. `Ne4xd6` is legal — the mover starts at 0 checkers, ends at 1
+   (the freshly discovered rook), and 1 ≤ max(0, 1).
+3. **A newly-self-discovered *second* check is not.** Same geometry as (2), plus a Black
+   queen on `h4` giving a *separate*, pre-existing single check along the `e1`-`h4`
+   diagonal. Now the mover starts at 1 checker, and `Ne4xd6` would discover the rook too,
+   ending at 2 — since 2 > max(1, 1), the knight has **no legal moves at all**, not even
+   the king capture. `crates/core/tests/fixtures/dense_03.json` independently surfaced the
+   same shape (knight `a6`, pinned along the a-file, blocked from capturing a king on `b4`
+   for the same reason, on top of a pre-existing unrelated single check from a queen).
+
+See `crates/core/src/attacks.rs`'s `attacker_count` and `crates/core/src/legal.rs`'s
+`legal_moves` for the implementation: legal iff `attackers_after <= max(attackers_before, 1)`,
+counted on the mover's own king before and after the move.
 
 The two generators of king capture:
 

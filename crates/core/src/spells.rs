@@ -25,22 +25,29 @@ pub fn is_square_frozen(pos: &Position, square: Square) -> bool {
     pos.fields.iter().any(|f| f.kind == SpellKind::Freeze && field_active(pos, f) && freeze_zone(f.square).contains(&square))
 }
 
+// A square already carrying a live field of a given kind is not a legal target for that
+// same kind again -- confirmed against the real engine (neither owner-specific nor
+// affected by the other spell type), see rules/30-freeze.md and rules/40-jump.md.
+fn is_field_anchor(pos: &Position, square: Square, kind: SpellKind) -> bool {
+    pos.fields.iter().any(|f| f.kind == kind && field_active(pos, f) && f.square == square)
+}
+
 pub fn freeze_targets(pos: &Position, color: Color) -> Vec<Square> {
     if !pos.spells(color).freeze.castable() {
         return Vec::new();
     }
-    (0..64).map(Square).collect()
+    (0..64).map(Square).filter(|&sq| !is_field_anchor(pos, sq, SpellKind::Freeze)).collect()
 }
 
 pub fn is_square_jump_active(pos: &Position, square: Square) -> bool {
-    pos.fields.iter().any(|f| f.kind == SpellKind::Jump && field_active(pos, f) && f.square == square)
+    is_field_anchor(pos, square, SpellKind::Jump)
 }
 
 pub fn jump_targets(pos: &Position, color: Color) -> Vec<Square> {
     if !pos.spells(color).jump.castable() {
         return Vec::new();
     }
-    (0..64).map(Square).filter(|&sq| pos.board.get(sq).is_some()).collect()
+    (0..64).map(Square).filter(|&sq| pos.board.get(sq).is_some() && !is_square_jump_active(pos, sq)).collect()
 }
 
 // `scan_pos` supplies piece positions and ray-walking occupancy (it may be a
@@ -114,35 +121,31 @@ fn mark_jump_relevant_squares(scan_pos: &Position, castable_at: &Position, relev
 
 /// A jump cast only changes anything if the target is the first blocker on some
 /// slider's ray (either color), a slider's own square (see
-/// `mark_jump_relevant_squares`'s self-hiding note), a pawn's double-step mid
-/// square (either color), or a square that already carries an active jump field --
-/// see docs/superpowers/specs/2026-08-12-search-branching-factor-design.md.
+/// `mark_jump_relevant_squares`'s self-hiding note), or a pawn's double-step mid
+/// square (either color) -- see
+/// docs/superpowers/specs/2026-08-12-search-branching-factor-design.md.
 ///
-/// The first three are checked on the current board *and* on the board as it would
-/// look after each of the mover's own candidate moves this turn: a slider arriving
-/// at (or vacating) a square can create a new first-blocker relationship that
-/// didn't exist before the move, and the cast-then-move turn is evaluated as a
-/// whole. Recasting on an already-active jump square doesn't change any ray
-/// geometry, but it refreshes the field's expiry, extending its lifetime by a ply
-/// -- which can matter for the opponent's very next reply.
+/// All three are checked on the current board *and* on the board as it would look
+/// after each of the mover's own candidate moves this turn: a slider arriving at
+/// (or vacating) a square can create a new first-blocker relationship that didn't
+/// exist before the move, and the cast-then-move turn is evaluated as a whole.
+///
+/// A square that already carries a live jump field is never a legal target at all
+/// (confirmed against the real engine, see rules/40-jump.md) -- not merely
+/// irrelevant, illegal -- so it's filtered out at the end regardless of how it was
+/// marked.
 pub fn relevant_jump_targets(pos: &Position, color: Color, baseline: &[PieceMove]) -> Vec<Square> {
     if !pos.spells(color).jump.castable() {
         return Vec::new();
     }
     let mut relevant: BTreeSet<Square> = BTreeSet::new();
 
-    for i in 0..64u8 {
-        let sq = Square(i);
-        if pos.board.get(sq).is_some() && is_square_jump_active(pos, sq) {
-            relevant.insert(sq);
-        }
-    }
-
     mark_jump_relevant_squares(pos, pos, &mut relevant);
     for mv in baseline {
         let hypothetical = crate::legal::apply_move_only(pos, mv);
         mark_jump_relevant_squares(&hypothetical, pos, &mut relevant);
     }
+    relevant.retain(|&sq| !is_square_jump_active(pos, sq));
     relevant.into_iter().collect()
 }
 
@@ -176,6 +179,9 @@ pub fn relevant_freeze_targets(pos: &Position, color: Color, baseline: &[PieceMo
             relevant.insert(z);
         }
     }
+    // A square already anchoring a live freeze field is never a legal target (see
+    // rules/30-freeze.md), regardless of zone geometry.
+    relevant.retain(|&sq| !is_field_anchor(pos, sq, SpellKind::Freeze));
     relevant.into_iter().collect()
 }
 

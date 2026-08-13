@@ -27,6 +27,34 @@ start position is all 64 squares.
 `[VERIFIED]` The effect is the **3×3 block of squares centred on the target, clipped to the
 board.** Squares outside the 8×8 board are simply not part of the zone.
 
+`[VERIFIED]` **A square that already has a live freeze field anchored on it is excluded
+from the freeze target list**, for either player, until that field expires — the mirror of
+jump's same-square exclusion (see [`40-jump.md`](40-jump.md#targeting)). Measured: White
+cast `freeze@c5`; on Black's very next turn the freeze target list was all 64 squares
+*except* `c5`. This is about the exact anchor square only, not the 3×3 zone it produces —
+a square merely *inside* someone's freeze zone (but not itself an anchor) is still a legal
+freeze target. The exclusion is independent of caster: it is "one live freeze field per
+square," not "you can't recast your own." A jump-field anchor on a square does not block
+freeze there, or vice versa. Confirmed with the browser oracle
+(`rules/70-engine-api.md`); see `crates/core/tests/fixtures/field_freeze_01_corner.json`.
+
+`[VERIFIED]` **A freeze target is also excluded from the target list if casting it would
+leave the mover with zero legal moves anywhere on the board.** A turn is spell-plus-
+mandatory-move; if every one of the mover's own pieces would end up frozen (or otherwise
+immobile) by the cast, there's no way to complete the mandatory move half of the turn, so
+the engine doesn't offer that square as a target at all — this is checked *before* move
+generation, not surfaced as "you have no moves" after the fact. Measured: a sparse position
+with Black to move holding only a king on `f6` and a pawn on `g4` (nothing else on the
+board for Black) had a 62-square freeze target list — every square *except* `f5` and `g5`,
+the only two centers whose 3×3 zone covers both `f6` and `g4` simultaneously, freezing
+Black's entire army in one cast. See `crates/core/tests/fixtures/sparse_03.json`. This
+exclusion happens to already fall out of `generate_turns`'s existing logic for free (a
+zero-legal-move hypothetical simply contributes no `Turn`s), so it required no production
+code change — only `crates/core/tests/oracle_vectors.rs` had to stop comparing against the
+raw `spells::freeze_targets`/`jump_targets` functions directly (which don't model this) and
+instead derive target lists from `generate_turns`'s actual output, matching the original
+Task 26 plan.
+
 | Target | Zone shape | Squares |
 |---|---|---|
 | Centre, e.g. `d5` | 3×3 (9) | c4 c5 c6, d4 d5 d6, e4 e5 e6 |

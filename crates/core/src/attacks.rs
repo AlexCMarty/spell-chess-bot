@@ -56,6 +56,57 @@ pub fn is_square_attacked(pos: &Position, square: Square, by: Color) -> bool {
     false
 }
 
+/// Counts distinct attackers of `square`. Only used on the rare king-capture path in
+/// `legal::legal_moves`, which needs to distinguish single from double check -- a
+/// plain boolean `is_square_attacked` can't, so this isn't used on the movegen hot
+/// path and doesn't bother with early-exit.
+pub fn attacker_count(pos: &Position, square: Square, by: Color) -> u32 {
+    let mut count = 0u32;
+    let pawn_dir: i8 = if by == Color::White { -1 } else { 1 };
+    for df in [-1i8, 1i8] {
+        let (f, r) = (square.file() as i8 + df, square.rank() as i8 + pawn_dir);
+        if (0..8).contains(&f) && (0..8).contains(&r) {
+            let sq = Square::new(f as u8, r as u8);
+            if has(pos, sq, by, PieceKind::Pawn) && !crate::spells::is_square_frozen(pos, sq) {
+                count += 1;
+            }
+        }
+    }
+    for (df, dr) in KNIGHT_OFFSETS {
+        let (f, r) = (square.file() as i8 + df, square.rank() as i8 + dr);
+        if (0..8).contains(&f) && (0..8).contains(&r) {
+            let sq = Square::new(f as u8, r as u8);
+            if has(pos, sq, by, PieceKind::Knight) && !crate::spells::is_square_frozen(pos, sq) {
+                count += 1;
+            }
+        }
+    }
+    for (df, dr) in KING_OFFSETS {
+        let (f, r) = (square.file() as i8 + df, square.rank() as i8 + dr);
+        if (0..8).contains(&f) && (0..8).contains(&r) {
+            let sq = Square::new(f as u8, r as u8);
+            if has(pos, sq, by, PieceKind::King) && !crate::spells::is_square_frozen(pos, sq) {
+                count += 1;
+            }
+        }
+    }
+    for dir in ROOK_DIRS {
+        if let Some(&sq) = walk_ray(pos, square, dir).last() {
+            if !crate::spells::is_square_frozen(pos, sq) && (has(pos, sq, by, PieceKind::Rook) || has(pos, sq, by, PieceKind::Queen)) {
+                count += 1;
+            }
+        }
+    }
+    for dir in BISHOP_DIRS {
+        if let Some(&sq) = walk_ray(pos, square, dir).last() {
+            if !crate::spells::is_square_frozen(pos, sq) && (has(pos, sq, by, PieceKind::Bishop) || has(pos, sq, by, PieceKind::Queen)) {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

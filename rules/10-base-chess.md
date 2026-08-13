@@ -40,15 +40,26 @@ cast, **it resolves exactly as in standard chess**.
 
 ## Modified rules
 
-### You still may not leave your own king in check
+### You still may not leave your own king in check — unless the move captures the enemy king
 
 `[VERIFIED]` Move legality is enforced normally: a move that leaves your king attacked is
-rejected. There is **no** "you may ignore check" rule.
+rejected. There is **no** general "you may ignore check" rule.
 
-The apparent counter-example — a player legally ignoring a check — is really the freeze
+The apparent counter-example — a player legally ignoring a check — is usually the freeze
 spell removing the check first. A frozen piece gives no check, so after freezing the
 checker there is simply no check to answer. See
 [`30-freeze.md#freezing-a-checker-dispels-the-check`](30-freeze.md#freezing-a-checker-dispels-the-check).
+
+`[VERIFIED]` The other, genuine exception: a move that **captures the enemy king** is legal
+even if it leaves the mover's own king in check — including an unrelated pre-existing
+check, and even a pre-existing *double* check. The one thing it may not do is **newly
+create** a second, simultaneous check via this exact move (e.g. a pinned piece breaking its
+pin to reach the enemy king) when the mover wasn't already facing that many attackers —
+that specific escalation is still illegal, mirroring the orthodox rule that only a king
+move answers double check. Being already in a double check you didn't just cause doesn't
+block the capture; causing one yourself does. See
+[`50-interactions.md#win-conditions`](50-interactions.md#win-conditions) for the three
+measured examples that pin this down.
 
 ### The king can be captured
 

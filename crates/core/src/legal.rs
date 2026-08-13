@@ -70,6 +70,25 @@ pub fn legal_moves(pos: &Position) -> Vec<PieceMove> {
         .into_iter()
         .filter(|mv| {
             let after = apply_move_only(pos, mv);
+            if after.board.king_square(mover.opposite()).is_none() {
+                // This move captures the enemy king outright, ending the game
+                // immediately -- so it's legal even if the mover's own king is left
+                // in check (single, double, or otherwise -- a pre-existing double
+                // check doesn't block it either, see rules/50-interactions.md
+                // #win-conditions), UNLESS *this exact move* is what pushes the
+                // mover's own checker count higher than it already was and past 1 --
+                // i.e. the capturing piece was itself blocking a different attacker,
+                // and unpinning it to reach the enemy king discovers a second,
+                // simultaneous check that didn't already exist. Orthodox rules
+                // require a king move to answer double check; that survives the
+                // king-capture exemption only in the "you just created this problem
+                // yourself" case, not the "you already had this problem" case.
+                let before_sq = pos.board.king_square(mover).expect("mover's king must be on the board before its own move");
+                let after_sq = after.board.king_square(mover).expect("mover's own king must still be on the board");
+                let before_count = crate::attacks::attacker_count(pos, before_sq, mover.opposite());
+                let after_count = crate::attacks::attacker_count(&after, after_sq, mover.opposite());
+                return after_count <= before_count.max(1);
+            }
             match after.board.king_square(mover) {
                 Some(king_sq) => !crate::attacks::is_square_attacked(&after, king_sq, mover.opposite()),
                 None => true, // this move itself captured the enemy king on a prior ply; not reachable here

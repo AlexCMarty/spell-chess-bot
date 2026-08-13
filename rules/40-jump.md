@@ -42,6 +42,19 @@ occupied square, both kings included, nothing else.
 | Own piece | `[VERIFIED]` legal | `[VERIFIED]` legal |
 | Enemy piece | `[VERIFIED]` legal | `[VERIFIED]` legal |
 | Either king | `[VERIFIED]` legal | `[VERIFIED]` legal |
+| Square already carrying a **live jump field** | `[VERIFIED]` legal (unaffected — freeze and jump exclusions are independent) | `[VERIFIED]` **illegal** — see below |
+
+`[VERIFIED]` **A square that already has a live jump field on it is not a legal jump
+target, for either player.** Measured: White cast `jump@c5` (a knight there); on Black's
+very next turn — before the field expires — `c5` was absent from Black's jump target
+list, even though it's still occupied and otherwise a completely ordinary target. The
+exclusion is by square and spell type only, independent of who owns the existing field or
+who is asking: it is not "you can't recast your own field" or "opponents can't target your
+field," it is "one live jump field per square, period." A square may still carry a live
+freeze field and be jump-targeted (or vice versa) — the two spell types don't block each
+other, only same-type recast on the same square is excluded. Confirmed with the browser
+oracle (`rules/70-engine-api.md`); see `crates/core/tests/fixtures/field_jump_01_discovered.json`
+and `field_jump_02_self.json`.
 
 ## Who can use the field
 
