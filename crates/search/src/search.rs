@@ -1,5 +1,5 @@
 use std::time::{Duration, Instant};
-use spellchess_core::{apply_turn, generate_turns, generate_search_turns, Position, Turn};
+use spellchess_core::{apply_turn, generate_search_turns, Position, Turn};
 use crate::eval::evaluate;
 use crate::tt::{Bound, TranspositionTable, TtEntry};
 use crate::zobrist::hash_position;
@@ -260,7 +260,7 @@ pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spellchess_core::{Board, Color, Piece, PieceKind, Position, Square};
+    use spellchess_core::{generate_turns, Board, Color, Piece, PieceKind, Position, Square};
 
     #[test]
     fn finds_back_rank_mate_in_one() {
@@ -294,12 +294,12 @@ mod tests {
 
     #[test]
     fn depth_budget_returns_a_move() {
-        // A minimal, spell-free position: Position::starting() at Budget::Depth(2) is
-        // combinatorially intractable pre-alpha-beta (freeze/jump target enumeration is
-        // unfiltered per Tasks 9/11 — see the ledger). This test only needs to prove the
-        // iterative-deepening loop in `search()` completes correctly across 2 plies; it
-        // doesn't need to stress-test a fully-populated board (that's Task 20's job, once
-        // pruning exists).
+        // A minimal, spell-free position, kept deliberately small: this test only needs
+        // to prove the iterative-deepening loop in `search()` completes correctly across
+        // 2 plies. `depth_three_search_completes_quickly_on_a_realistic_board` below is
+        // the stress test on a fully-populated board, now that spell candidate generation
+        // is relevance-filtered (see
+        // docs/superpowers/specs/2026-08-12-search-branching-factor-design.md).
         let mut pos = Position { board: Board::empty(), ..Position::starting() };
         pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
         pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
@@ -336,6 +336,32 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(5),
             "a 2s budget must not overrun by orders of magnitude, took {elapsed:?}",
+        );
+    }
+
+    /// Regression test for the branching-factor fix: `go --depth N` is unbounded by
+    /// design (Budget::Depth passes no deadline), and before relevance-filtered
+    /// candidate generation, depth 1 alone measured ~54s on the fully-populated
+    /// starting position. Measured after the fix in a release build: depth 1 ~2.8s,
+    /// depth 2 ~33s -- the filter helps most in sparser positions (see the design doc),
+    /// so the dense opening still isn't cheap at higher depths. This pins down the
+    /// exact regression that was reported: depth 1 specifically must now be fast.
+    ///
+    /// The bound is tuned for a release build; debug-build overhead (no inlining, no
+    /// bounds-check elision, more expensive allocation) swamps the algorithmic win here
+    /// almost entirely -- a debug build measures ~53s, indistinguishable from the old
+    /// unfiltered cost. Run with `cargo test -p spellchess-search --release -- --ignored`.
+    #[test]
+    #[ignore = "slow and misleading in a debug build; see doc comment"]
+    fn depth_budget_stays_bounded_on_a_realistic_board() {
+        let pos = Position::starting();
+        let start = std::time::Instant::now();
+        let result = search(&pos, Budget::Depth(1));
+        let elapsed = start.elapsed();
+        assert!(result.is_some(), "a legal turn exists in the starting position");
+        assert!(
+            elapsed < Duration::from_secs(15),
+            "depth-1 search on a fully-populated board must stay well under the old ~54s, took {elapsed:?}",
         );
     }
 
