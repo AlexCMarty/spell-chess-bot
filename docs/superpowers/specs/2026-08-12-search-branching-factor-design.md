@@ -46,17 +46,43 @@ exactly the caster's own move plus the opponent's one reply (`expires_after_ply:
 1`) — so if the zone is empty now and nothing can land there this turn, it stays empty and
 inert through the field's entire lifetime, since nothing else moves before it expires.
 
-A jump cast only matters if the target square is the first blocker (ignoring jump
-transparency) on some slider's ray from any rook/bishop/queen on the board of either
-color, or is the "mid" square for some pawn's double-step (either color, on that pawn's
-start rank). Both are directly checkable from `rays.rs`'s ray-walk and `movegen.rs`'s pawn
-double-step logic, which are the only two places `is_square_jump_active` is consulted
-besides `spells.rs` itself.
+A jump cast only matters if the target square is relevant to the ray-walking that
+`rays.rs` and `movegen.rs`'s pawn double-step logic do — the only places
+`is_square_jump_active` is consulted besides `spells.rs` itself. This turned out to need
+more conditions than the "first blocker on a ray" intuition it started from; each of the
+following was found missing by differential fuzzing (random legal walks, ~63k positions
+checked) against the exhaustive baseline before landing on the final rule:
 
-This filter is provably sound (never excludes a target whose resulting legal-move set
-would differ from today's exhaustive enumeration) and is validated by differential
-property testing against the existing exhaustive `generate_turns` as oracle, rather than
-by proof alone — see Testing.
+- The target is the first blocker (ignoring jump transparency) on some slider's ray, from
+  any rook/bishop/queen of either color — the original intuition, still the core case.
+- The target is the *second* blocker on such a ray, i.e. the first blocker behind the
+  first one. The field survives the caster's move plus the opponent's one reply, so at
+  most one more piece (the opponent's own moving piece) can vacate the first blocker
+  within the field's lifetime, exposing whatever sits behind it to a discovered attack
+  through the jump-transparent target.
+- The target is itself occupied by a slider. `is_square_attacked` detects a slider
+  attacker by walking a ray *from the target square being checked* and taking whatever it
+  finds last — the same `walk_ray` used for movement. If the slider itself sits on a
+  jump-active square, that walk sees straight through it and reports whatever (if
+  anything) is behind it instead, hiding the slider as an attacker.
+- The target already carries an active jump field. Recasting there doesn't change any ray
+  geometry, but it refreshes the field's expiry, extending its lifetime by a ply — which
+  can matter for the opponent's very next reply even though nothing about the board
+  changed.
+- The target is the "mid" square for some pawn's double-step (either color, on that
+  pawn's start rank) — unaffected by the above, a single direct occupancy check, no
+  second-level case (a pawn's double-step isn't a multi-square ray).
+
+The first three are checked on the current board *and* on the board as it would look after
+each of the mover's own candidate moves this turn, for the same reason freeze's landing set
+does: a slider arriving at (or vacating) a square can create a relevant relationship that
+didn't exist before the move.
+
+This filter is validated by differential property testing against the existing exhaustive
+`generate_turns` as oracle rather than by proof alone — see Testing. The by-hand soundness
+argument this section started with proved unreliable in practice (see the git history on
+`crates/core/src/spells.rs` for the three fixes fuzzing found); treat the bullet list above
+as the load-bearing spec, and the test suite as the actual guarantee.
 
 ### Why this is scoped to `search`, not `generate_turns` itself
 
@@ -74,7 +100,7 @@ New functions in `crates/core/src/spells.rs`, alongside the existing `freeze_tar
 
 ```rust
 pub fn relevant_freeze_targets(pos: &Position, color: Color, baseline: &[PieceMove]) -> Vec<Square>
-pub fn relevant_jump_targets(pos: &Position, color: Color) -> Vec<Square>
+pub fn relevant_jump_targets(pos: &Position, color: Color, baseline: &[PieceMove]) -> Vec<Square>
 ```
 
 - `relevant_freeze_targets` takes the already-computed no-spell legal moves (`baseline`)
@@ -85,10 +111,14 @@ pub fn relevant_jump_targets(pos: &Position, color: Color) -> Vec<Square>
   contains a landing square" is equivalent to "target is in that landing square's own
   zone" — one pass over the landing set suffices, not 64 zone-containment checks.) Still
   gated by `SpellCounter::castable()` exactly like `freeze_targets`.
-- `relevant_jump_targets` walks each slider's rays with the existing `rays::walk_ray` and
-  keeps whatever square each ray currently stops at (mirroring the `.last()` pattern
-  already used in `attacks::is_square_attacked`), plus each pawn's double-step mid square
-  if occupied. Still filtered to occupied squares like `jump_targets`.
+- `relevant_jump_targets` also takes `baseline`, for the current-board-plus-hypothetical
+  scanning described above. It walks each slider's rays with `rays::walk_ray`, marking the
+  first and second blocker on each; marks every slider's own square; marks pawn
+  double-step mid squares; and separately marks any square that already carries an active
+  `is_square_jump_active` field. Every marked square is filtered to ones occupied in the
+  *original* (pre-move) position, since that's the only domain `jump_targets` is ever
+  defined over — a square only occupied in a post-move hypothetical (e.g. a move's `to`
+  square) is never a valid cast target regardless of what the hypothetical scan finds.
 
 New function in `crates/core/src/legal.rs`:
 
@@ -144,10 +174,14 @@ Supporting tests:
 
 - `relevant_freeze_targets(..) ⊆ freeze_targets(..)` and `relevant_jump_targets(..) ⊆
   jump_targets(..)` — the filter only removes candidates, never invents one.
-- Concrete reduction assertions demonstrating the win, e.g. the starting position's jump
-  targets drop from 32 occupied squares to ~16 (only pawns are ever a first blocker on any
-  ray — every back-rank piece is shielded by its own pawns on both sides in the opening).
-  Live alongside the new functions in `spells.rs`.
+- Concrete reduction assertions demonstrating the win: a general `relevant.len() <
+  exhaustive.len()` check on the starting position (not a hardcoded magic number — the
+  exact count is an implementation detail to verify empirically, not something to pin down
+  by hand in this doc), plus one hand-verified concrete example: in the starting position,
+  `f1`'s bishop is never the first blocker on any slider's ray (the queen's rank-ray and
+  h1's rook are each blocked earlier, by `e1`'s king and `g1`'s knight respectively), so
+  `f1` is excluded from `relevant_jump_targets` while still present in the exhaustive
+  `jump_targets`. Live alongside the new functions in `spells.rs`.
 - A `search`-side perf test, following the existing pattern of
   `time_budget_is_respected_on_a_full_board`: fixed-depth search on a realistic,
   tactically-dense position (reconstructed for this test — the original reviewer
