@@ -1,0 +1,154 @@
+{
+  "name": "medium_03",
+  "pieces": {
+    "c3": "0K",
+    "h2": "2K",
+    "b2": "2N",
+    "a2": "0P",
+    "a6": "2N",
+    "f1": "2R",
+    "b1": "0N",
+    "d7": "2Q",
+    "h3": "2N",
+    "d2": "0R",
+    "e8": "2R",
+    "c2": "2B",
+    "d5": "0P",
+    "d1": "2Q",
+    "h5": "2P"
+  },
+  "side_to_move": "black",
+  "castle_rights": {
+    "white_kingside": false,
+    "white_queenside": false,
+    "black_kingside": false,
+    "black_queenside": false
+  },
+  "white_spells": {
+    "freeze": {
+      "count": 5,
+      "lock": 0
+    },
+    "jump": {
+      "count": 2,
+      "lock": 0
+    }
+  },
+  "black_spells": {
+    "freeze": {
+      "count": 5,
+      "lock": 0
+    },
+    "jump": {
+      "count": 2,
+      "lock": 0
+    }
+  },
+  "fields": [],
+  "ply": 0,
+  "expected": {
+    "destinations": {
+      "h2": [
+        "g1",
+        "g3",
+        "h1"
+      ],
+      "f1": [
+        "f2"
+      ],
+      "h3": [
+        "f2"
+      ],
+      "e8": [
+        "e2"
+      ],
+      "d1": [
+        "d2",
+        "e2"
+      ]
+    },
+    "freeze_targets": [
+      "a1",
+      "a2",
+      "a3",
+      "a4",
+      "a5",
+      "a6",
+      "a7",
+      "a8",
+      "b1",
+      "b2",
+      "b3",
+      "b4",
+      "b5",
+      "b6",
+      "b7",
+      "b8",
+      "c1",
+      "c2",
+      "c3",
+      "c4",
+      "c5",
+      "c6",
+      "c7",
+      "c8",
+      "d1",
+      "d2",
+      "d3",
+      "d4",
+      "d5",
+      "d6",
+      "d7",
+      "d8",
+      "e1",
+      "e2",
+      "e3",
+      "e4",
+      "e5",
+      "e6",
+      "e7",
+      "e8",
+      "f1",
+      "f2",
+      "f3",
+      "f4",
+      "f5",
+      "f6",
+      "f7",
+      "f8",
+      "g1",
+      "g2",
+      "g3",
+      "g4",
+      "g5",
+      "g6",
+      "g7",
+      "g8",
+      "h1",
+      "h2",
+      "h3",
+      "h4",
+      "h5",
+      "h6",
+      "h7",
+      "h8"
+    ],
+    "jump_targets": [
+      "a2",
+      "a6",
+      "b1",
+      "b2",
+      "c2",
+      "c3",
+      "d1",
+      "d2",
+      "d5",
+      "d7",
+      "e8",
+      "f1",
+      "h2",
+      "h3",
+      "h5"
+    ]
+  }
+}

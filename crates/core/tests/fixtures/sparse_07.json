@@ -1,0 +1,147 @@
+{
+  "name": "sparse_07",
+  "pieces": {
+    "g4": "0K",
+    "c8": "2K",
+    "h6": "0Q",
+    "f2": "2R",
+    "b8": "2B"
+  },
+  "side_to_move": "black",
+  "castle_rights": {
+    "white_kingside": false,
+    "white_queenside": false,
+    "black_kingside": false,
+    "black_queenside": false
+  },
+  "white_spells": {
+    "freeze": {
+      "count": 5,
+      "lock": 0
+    },
+    "jump": {
+      "count": 2,
+      "lock": 0
+    }
+  },
+  "black_spells": {
+    "freeze": {
+      "count": 5,
+      "lock": 0
+    },
+    "jump": {
+      "count": 2,
+      "lock": 0
+    }
+  },
+  "fields": [],
+  "ply": 0,
+  "expected": {
+    "destinations": {
+      "c8": [
+        "b7",
+        "c7",
+        "d7",
+        "d8"
+      ],
+      "f2": [
+        "a2",
+        "b2",
+        "c2",
+        "d2",
+        "e2",
+        "f1",
+        "f3",
+        "f4",
+        "f5",
+        "f6",
+        "f7",
+        "f8",
+        "g2",
+        "h2"
+      ],
+      "b8": [
+        "a7",
+        "c7",
+        "d6",
+        "e5",
+        "f4",
+        "g3",
+        "h2"
+      ]
+    },
+    "freeze_targets": [
+      "a1",
+      "a2",
+      "a3",
+      "a4",
+      "a5",
+      "a6",
+      "a7",
+      "a8",
+      "b1",
+      "b2",
+      "b3",
+      "b4",
+      "b5",
+      "b6",
+      "b7",
+      "b8",
+      "c1",
+      "c2",
+      "c3",
+      "c4",
+      "c5",
+      "c6",
+      "c7",
+      "c8",
+      "d1",
+      "d2",
+      "d3",
+      "d4",
+      "d5",
+      "d6",
+      "d7",
+      "d8",
+      "e1",
+      "e2",
+      "e3",
+      "e4",
+      "e5",
+      "e6",
+      "e7",
+      "e8",
+      "f1",
+      "f2",
+      "f3",
+      "f4",
+      "f5",
+      "f6",
+      "f7",
+      "f8",
+      "g1",
+      "g2",
+      "g3",
+      "g4",
+      "g5",
+      "g6",
+      "g7",
+      "g8",
+      "h1",
+      "h2",
+      "h3",
+      "h4",
+      "h5",
+      "h6",
+      "h7",
+      "h8"
+    ],
+    "jump_targets": [
+      "b8",
+      "c8",
+      "f2",
+      "g4",
+      "h6"
+    ]
+  }
+}
