@@ -120,6 +120,14 @@ pub fn generate_turns(pos: &Position) -> Vec<Turn> {
     )
 }
 
+pub fn generate_search_turns(pos: &Position) -> Vec<Turn> {
+    let color = pos.side_to_move;
+    let baseline = legal_moves(pos);
+    let freeze_targets = crate::spells::relevant_freeze_targets(pos, color, &baseline);
+    let jump_targets = crate::spells::relevant_jump_targets(pos, color);
+    generate_turns_from(pos, baseline, freeze_targets, jump_targets)
+}
+
 pub fn apply_turn(pos: &Position, turn: &Turn) -> Position {
     let mover = pos.side_to_move;
     let mut next = apply_move_only(pos, &turn.mv);
@@ -349,6 +357,23 @@ mod tests {
         pos.white_spells.freeze.lock = 2;
         let turns = generate_turns(&pos);
         assert!(!turns.iter().any(|t| t.spell.is_some()));
+    }
+
+    #[test]
+    fn generate_search_turns_matches_generate_turns_move_count_on_a_no_spell_position() {
+        let mut pos = Position::starting();
+        pos.white_spells.freeze.count = 0;
+        pos.white_spells.jump.count = 0;
+        let exhaustive = generate_turns(&pos);
+        let filtered = generate_search_turns(&pos);
+        assert_eq!(exhaustive.len(), filtered.len());
+        assert_eq!(exhaustive.len(), legal_moves(&pos).len());
+    }
+
+    #[test]
+    fn generate_search_turns_is_never_larger_than_generate_turns() {
+        let pos = Position::starting();
+        assert!(generate_search_turns(&pos).len() <= generate_turns(&pos).len());
     }
 
     #[test]
