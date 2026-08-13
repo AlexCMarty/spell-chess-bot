@@ -89,21 +89,35 @@ fn position_with_field(pos: &Position, cast: SpellCast) -> Position {
     next
 }
 
-pub fn generate_turns(pos: &Position) -> Vec<Turn> {
-    let mut turns: Vec<Turn> = legal_moves(pos).into_iter().map(|mv| Turn { spell: None, mv }).collect();
-    let color = pos.side_to_move;
+fn generate_turns_from(
+    pos: &Position,
+    baseline: Vec<PieceMove>,
+    freeze_targets: Vec<Square>,
+    jump_targets: Vec<Square>,
+) -> Vec<Turn> {
+    let mut turns: Vec<Turn> = baseline.into_iter().map(|mv| Turn { spell: None, mv }).collect();
 
-    for sq in crate::spells::freeze_targets(pos, color) {
+    for sq in freeze_targets {
         let cast = SpellCast { kind: SpellKind::Freeze, square: sq };
         let hypothetical = position_with_field(pos, cast);
         turns.extend(legal_moves(&hypothetical).into_iter().map(|mv| Turn { spell: Some(cast), mv }));
     }
-    for sq in crate::spells::jump_targets(pos, color) {
+    for sq in jump_targets {
         let cast = SpellCast { kind: SpellKind::Jump, square: sq };
         let hypothetical = position_with_field(pos, cast);
         turns.extend(legal_moves(&hypothetical).into_iter().map(|mv| Turn { spell: Some(cast), mv }));
     }
     turns
+}
+
+pub fn generate_turns(pos: &Position) -> Vec<Turn> {
+    let color = pos.side_to_move;
+    generate_turns_from(
+        pos,
+        legal_moves(pos),
+        crate::spells::freeze_targets(pos, color),
+        crate::spells::jump_targets(pos, color),
+    )
 }
 
 pub fn apply_turn(pos: &Position, turn: &Turn) -> Position {
