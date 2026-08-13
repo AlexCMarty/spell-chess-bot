@@ -94,7 +94,7 @@ fn alphabeta(
     }
 
     let bound = if best <= original_alpha { Bound::Upper } else if best >= beta { Bound::Lower } else { Bound::Exact };
-    tt.insert(key, TtEntry { depth, score: best, bound });
+    tt.insert(key, TtEntry { depth, score: best, bound, best_move: None });
     Some(best)
 }
 
