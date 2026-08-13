@@ -3,3 +3,4 @@ pub mod zobrist;
 pub mod search;
 pub mod ordering;
 pub mod tt;
+pub mod tables;
