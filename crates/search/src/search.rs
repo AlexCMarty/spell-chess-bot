@@ -73,7 +73,7 @@ fn alphabeta(
         return quiescence(pos, alpha, beta, MAX_QUIESCENCE_DEPTH, deadline, turns);
     }
 
-    let ordered = crate::ordering::order_turns(pos, turns);
+    let ordered = crate::ordering::order_turns(pos, turns, None, [None, None], None);
     let mut best = i32::MIN + 1;
     let original_alpha = alpha;
     for turn in ordered {
@@ -200,7 +200,7 @@ pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
                 break;
             }
         }
-        let turns = crate::ordering::order_turns(pos, generate_search_turns(pos));
+        let turns = crate::ordering::order_turns(pos, generate_search_turns(pos), None, [None, None], None);
         if turns.is_empty() {
             break;
         }
@@ -249,7 +249,7 @@ pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
     // None means "no legal turn exists", which would be a lie here -- fall back to
     // the move `order_turns` ranks first, scored by a single static eval.
     if best.is_none() {
-        if let Some(turn) = crate::ordering::order_turns(pos, generate_search_turns(pos)).into_iter().next() {
+        if let Some(turn) = crate::ordering::order_turns(pos, generate_search_turns(pos), None, [None, None], None).into_iter().next() {
             let score = -evaluate(&apply_turn(pos, &turn));
             best = Some((turn, score));
         }
