@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use crate::movegen::PieceMove;
 use crate::position::{Position, SpellField, SpellKind};
 use crate::types::{Color, PieceKind, Square};
 
@@ -90,6 +91,39 @@ pub fn relevant_jump_targets(pos: &Position, color: Color) -> Vec<Square> {
     relevant.into_iter().collect()
 }
 
+/// A freeze cast only changes anything if its 3x3 zone touches a square that's
+/// either occupied now or reachable by one of the mover's own legal moves this
+/// turn (including a castling move's rook-landing square) -- see
+/// docs/superpowers/specs/2026-08-12-search-branching-factor-design.md.
+pub fn relevant_freeze_targets(pos: &Position, color: Color, baseline: &[PieceMove]) -> Vec<Square> {
+    if !pos.spells(color).freeze.castable() {
+        return Vec::new();
+    }
+    let mut landing: BTreeSet<Square> = BTreeSet::new();
+    for i in 0..64u8 {
+        let sq = Square(i);
+        if pos.board.get(sq).is_some() {
+            landing.insert(sq);
+        }
+    }
+    for mv in baseline {
+        landing.insert(mv.to);
+        if mv.is_castle {
+            let rank = mv.from.rank();
+            let rook_to = if mv.to.file() == 6 { Square::new(5, rank) } else { Square::new(3, rank) };
+            landing.insert(rook_to);
+        }
+    }
+
+    let mut relevant: BTreeSet<Square> = BTreeSet::new();
+    for sq in landing {
+        for z in freeze_zone(sq) {
+            relevant.insert(z);
+        }
+    }
+    relevant.into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +179,47 @@ mod tests {
         let mut pos = Position::starting();
         pos.white_spells.jump.count = 0;
         assert!(relevant_jump_targets(&pos, Color::White).is_empty());
+    }
+
+    fn sparse_endgame() -> Position {
+        let mut pos = Position { board: crate::board::Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(crate::types::Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("a1").unwrap(), Some(crate::types::Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(crate::types::Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("h8").unwrap(), Some(crate::types::Piece { color: Color::Black, kind: PieceKind::Rook }));
+        pos
+    }
+
+    #[test]
+    fn relevant_freeze_targets_is_a_subset_of_freeze_targets() {
+        let pos = sparse_endgame();
+        let baseline = crate::legal::legal_moves(&pos);
+        let exhaustive = freeze_targets(&pos, Color::White);
+        let relevant = relevant_freeze_targets(&pos, Color::White, &baseline);
+        for sq in &relevant {
+            assert!(exhaustive.contains(sq));
+        }
+        assert!(relevant.len() < exhaustive.len());
+    }
+
+    #[test]
+    fn f5_is_excluded_when_unreachable_in_a_sparse_endgame() {
+        // White's only this-turn landing squares are the fully-open a-file (the
+        // rook), b1/c1/d1 (the rook along rank 1, blocked by its own king), and
+        // d1/d2/e2/f1/f2 (the king) -- plus the occupied squares e1/a1/e8/h8.
+        // f5's 3x3 zone (e4-g6) touches none of that.
+        let pos = sparse_endgame();
+        let baseline = crate::legal::legal_moves(&pos);
+        let relevant = relevant_freeze_targets(&pos, Color::White, &baseline);
+        assert!(!relevant.contains(&Square::from_str("f5").unwrap()));
+    }
+
+    #[test]
+    fn relevant_freeze_targets_respects_castable_gate() {
+        let pos = sparse_endgame();
+        let baseline = crate::legal::legal_moves(&pos);
+        let mut gated = pos.clone();
+        gated.white_spells.freeze.count = 0;
+        assert!(relevant_freeze_targets(&gated, Color::White, &baseline).is_empty());
     }
 }
