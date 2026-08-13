@@ -124,7 +124,7 @@ pub fn generate_search_turns(pos: &Position) -> Vec<Turn> {
     let color = pos.side_to_move;
     let baseline = legal_moves(pos);
     let freeze_targets = crate::spells::relevant_freeze_targets(pos, color, &baseline);
-    let jump_targets = crate::spells::relevant_jump_targets(pos, color);
+    let jump_targets = crate::spells::relevant_jump_targets(pos, color, &baseline);
     generate_turns_from(pos, baseline, freeze_targets, jump_targets)
 }
 

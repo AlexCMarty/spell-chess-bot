@@ -43,18 +43,30 @@ pub fn jump_targets(pos: &Position, color: Color) -> Vec<Square> {
     (0..64).map(Square).filter(|&sq| pos.board.get(sq).is_some()).collect()
 }
 
-/// A jump cast only changes anything if the target is the first blocker on some
-/// slider's ray (either color), or a pawn's double-step mid square (either color) --
-/// see docs/superpowers/specs/2026-08-12-search-branching-factor-design.md.
-pub fn relevant_jump_targets(pos: &Position, color: Color) -> Vec<Square> {
-    if !pos.spells(color).jump.castable() {
-        return Vec::new();
-    }
-    let mut relevant: BTreeSet<Square> = BTreeSet::new();
-
+// `scan_pos` supplies piece positions and ray-walking occupancy (it may be a
+// hypothetical post-move board); `castable_at` gates which blocker squares are
+// actually valid jump-cast targets, which is always the *original* pre-move board --
+// jump_targets is only ever defined over squares occupied before the mover's move,
+// so a square that's only occupied in a hypothetical (e.g. a move's destination) is
+// never a real candidate even if it would be a first-blocker after that move.
+fn mark_jump_relevant_squares(scan_pos: &Position, castable_at: &Position, relevant: &mut BTreeSet<Square>) {
     for i in 0..64u8 {
         let sq = Square(i);
-        let Some(piece) = pos.board.get(sq) else { continue };
+        let Some(piece) = scan_pos.board.get(sq) else { continue };
+
+        // is_square_attacked detects a slider attacker by walking a ray *from the
+        // target square* and taking whatever it finds last -- exactly the same
+        // walk_ray used for movement. If the slider itself sits on a jump-active
+        // square, that walk sees straight through it and reports whatever (if
+        // anything) is behind it instead, hiding the slider as an attacker. So any
+        // square a slider occupies is always a relevant jump target in its own
+        // right, independent of whether it blocks anyone else's ray.
+        if matches!(piece.kind, PieceKind::Rook | PieceKind::Bishop | PieceKind::Queen)
+            && castable_at.board.get(sq).is_some()
+        {
+            relevant.insert(sq);
+        }
+
         let mut dirs: Vec<(i8, i8)> = Vec::new();
         if matches!(piece.kind, PieceKind::Rook | PieceKind::Queen) {
             dirs.extend_from_slice(&crate::rays::ROOK_DIRS);
@@ -63,9 +75,20 @@ pub fn relevant_jump_targets(pos: &Position, color: Color) -> Vec<Square> {
             dirs.extend_from_slice(&crate::rays::BISHOP_DIRS);
         }
         for dir in dirs {
-            if let Some(&blocker) = crate::rays::walk_ray(pos, sq, dir).last() {
-                if pos.board.get(blocker).is_some() {
-                    relevant.insert(blocker);
+            // Mark the first blocker *and* the one behind it: the field survives
+            // for the caster's own move plus the opponent's one reply, so at most
+            // one more piece (the opponent's own moving piece) can vacate the
+            // first blocker's square within the field's lifetime, exposing
+            // whatever sits behind it on the same ray to a check through the
+            // jump-transparent target.
+            if let Some(&first) = crate::rays::walk_ray(scan_pos, sq, dir).last() {
+                if castable_at.board.get(first).is_some() {
+                    relevant.insert(first);
+                }
+                if let Some(&second) = crate::rays::walk_ray(scan_pos, first, dir).last() {
+                    if castable_at.board.get(second).is_some() {
+                        relevant.insert(second);
+                    }
                 }
             }
         }
@@ -73,7 +96,7 @@ pub fn relevant_jump_targets(pos: &Position, color: Color) -> Vec<Square> {
 
     for i in 0..64u8 {
         let sq = Square(i);
-        let Some(piece) = pos.board.get(sq) else { continue };
+        let Some(piece) = scan_pos.board.get(sq) else { continue };
         if piece.kind != PieceKind::Pawn {
             continue;
         }
@@ -83,11 +106,43 @@ pub fn relevant_jump_targets(pos: &Position, color: Color) -> Vec<Square> {
         }
         let dir: i8 = if piece.color == Color::White { 1 } else { -1 };
         let mid = Square::new(sq.file(), (sq.rank() as i8 + dir) as u8);
-        if pos.board.get(mid).is_some() {
+        if castable_at.board.get(mid).is_some() {
             relevant.insert(mid);
         }
     }
+}
 
+/// A jump cast only changes anything if the target is the first blocker on some
+/// slider's ray (either color), a slider's own square (see
+/// `mark_jump_relevant_squares`'s self-hiding note), a pawn's double-step mid
+/// square (either color), or a square that already carries an active jump field --
+/// see docs/superpowers/specs/2026-08-12-search-branching-factor-design.md.
+///
+/// The first three are checked on the current board *and* on the board as it would
+/// look after each of the mover's own candidate moves this turn: a slider arriving
+/// at (or vacating) a square can create a new first-blocker relationship that
+/// didn't exist before the move, and the cast-then-move turn is evaluated as a
+/// whole. Recasting on an already-active jump square doesn't change any ray
+/// geometry, but it refreshes the field's expiry, extending its lifetime by a ply
+/// -- which can matter for the opponent's very next reply.
+pub fn relevant_jump_targets(pos: &Position, color: Color, baseline: &[PieceMove]) -> Vec<Square> {
+    if !pos.spells(color).jump.castable() {
+        return Vec::new();
+    }
+    let mut relevant: BTreeSet<Square> = BTreeSet::new();
+
+    for i in 0..64u8 {
+        let sq = Square(i);
+        if pos.board.get(sq).is_some() && is_square_jump_active(pos, sq) {
+            relevant.insert(sq);
+        }
+    }
+
+    mark_jump_relevant_squares(pos, pos, &mut relevant);
+    for mv in baseline {
+        let hypothetical = crate::legal::apply_move_only(pos, mv);
+        mark_jump_relevant_squares(&hypothetical, pos, &mut relevant);
+    }
     relevant.into_iter().collect()
 }
 
@@ -148,8 +203,9 @@ mod tests {
     #[test]
     fn relevant_jump_targets_is_a_subset_of_jump_targets() {
         let pos = Position::starting();
+        let baseline = crate::legal::legal_moves(&pos);
         let exhaustive = jump_targets(&pos, Color::White);
-        let relevant = relevant_jump_targets(&pos, Color::White);
+        let relevant = relevant_jump_targets(&pos, Color::White, &baseline);
         for sq in &relevant {
             assert!(exhaustive.contains(sq));
         }
@@ -157,20 +213,12 @@ mod tests {
     }
 
     #[test]
-    fn f1_bishop_is_not_a_first_blocker_in_the_starting_position() {
-        // f1's only slider-facing neighbors are blocked earlier: the queen's
-        // rightward rank-ray stops at e1 (the king), and h1's rook's leftward
-        // rank-ray stops at g1 (the knight) -- nothing ever rays as far as f1.
-        let pos = Position::starting();
-        let relevant = relevant_jump_targets(&pos, Color::White);
-        assert!(!relevant.contains(&Square::from_str("f1").unwrap()));
-    }
-
-    #[test]
     fn b1_knight_is_a_first_blocker_in_the_starting_position() {
-        // a1's rook rank-ray immediately hits b1.
+        // a1's rook rank-ray immediately hits b1, on the board as it stands --
+        // true regardless of what the mover does with their move this turn.
         let pos = Position::starting();
-        let relevant = relevant_jump_targets(&pos, Color::White);
+        let baseline = crate::legal::legal_moves(&pos);
+        let relevant = relevant_jump_targets(&pos, Color::White, &baseline);
         assert!(relevant.contains(&Square::from_str("b1").unwrap()));
     }
 
@@ -178,7 +226,8 @@ mod tests {
     fn relevant_jump_targets_respects_castable_gate() {
         let mut pos = Position::starting();
         pos.white_spells.jump.count = 0;
-        assert!(relevant_jump_targets(&pos, Color::White).is_empty());
+        let baseline = crate::legal::legal_moves(&pos);
+        assert!(relevant_jump_targets(&pos, Color::White, &baseline).is_empty());
     }
 
     fn sparse_endgame() -> Position {
