@@ -99,10 +99,9 @@ fn build_position(fx: &Fixture) -> Position {
         board.set(square, Some(parse_piece(code)));
     }
 
-    let fields = fx
-        .fields
-        .iter()
-        .map(|f| SpellField {
+    let mut fields = FieldSet::new();
+    for f in &fx.fields {
+        fields.push(SpellField {
             square: Square::from_str(&f.square).unwrap_or_else(|| panic!("bad field square: {}", f.square)),
             owner: parse_color(&f.owner),
             kind: match f.kind.as_str() {
@@ -111,8 +110,8 @@ fn build_position(fx: &Fixture) -> Position {
                 other => panic!("unknown spell kind: {other}"),
             },
             expires_after_ply: f.expires_after_ply,
-        })
-        .collect();
+        });
+    }
 
     Position {
         board,

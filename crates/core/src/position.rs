@@ -67,7 +67,7 @@ pub struct Position {
     pub ply: u64,
     pub white_spells: SpellState,
     pub black_spells: SpellState,
-    pub fields: Vec<SpellField>,
+    pub fields: crate::fields::FieldSet,
 }
 
 impl Position {
@@ -81,7 +81,7 @@ impl Position {
             ply: 0,
             white_spells: SpellState::starting(),
             black_spells: SpellState::starting(),
-            fields: Vec::new(),
+            fields: crate::fields::FieldSet::new(),
         }
     }
 

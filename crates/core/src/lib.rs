@@ -4,6 +4,9 @@ pub use types::*;
 pub mod board;
 pub use board::Board;
 
+pub mod fields;
+pub use fields::FieldSet;
+
 pub mod position;
 pub use position::*;
 
