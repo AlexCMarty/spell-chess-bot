@@ -3,6 +3,13 @@ This is a project to create a bot that can beat humans at the game of Spell Ches
 **Only ever open `https://www.chess.com/variants/spell-chess/analysis`.** Other pages can
 match you into a game against a human, which would be a terms-of-service violation.
 
+## Workspace
+
+Three-crate Cargo workspace: `crates/core` (board, movegen, rules engine — no internal deps),
+`crates/search` (search algorithms, depends on `core`), `crates/cli` (the `spellchess` binary,
+depends on both). `cargo build --workspace` / `cargo test --workspace` cover everything; scope
+to `-p spellchess-core` etc. to iterate on one crate.
+
 ## Ruleset
 
 Full rule corpus lives in [`rules/`](rules/), routed from [`rules/INDEX.md`](rules/INDEX.md) —
