@@ -52,8 +52,28 @@ fn field_active(pos: &Position, field: &SpellField) -> bool {
     pos.ply <= field.expires_after_ply
 }
 
+pub fn frozen_bb(pos: &Position) -> Bitboard {
+    let mut acc = Bitboard::EMPTY;
+    for f in pos.fields.iter() {
+        if f.kind == SpellKind::Freeze && field_active(pos, f) {
+            acc = acc.union(FREEZE_ZONE[f.square.0 as usize]);
+        }
+    }
+    acc
+}
+
+pub fn jump_bb(pos: &Position) -> Bitboard {
+    let mut acc = Bitboard::EMPTY;
+    for f in pos.fields.iter() {
+        if f.kind == SpellKind::Jump && field_active(pos, f) {
+            acc = acc.with(f.square);
+        }
+    }
+    acc
+}
+
 pub fn is_square_frozen(pos: &Position, square: Square) -> bool {
-    pos.fields.iter().any(|f| f.kind == SpellKind::Freeze && field_active(pos, f) && freeze_zone(f.square).contains(&square))
+    frozen_bb(pos).contains(square)
 }
 
 // A square already carrying a live field of a given kind is not a legal target for that
@@ -71,7 +91,7 @@ pub fn freeze_targets(pos: &Position, color: Color) -> Vec<Square> {
 }
 
 pub fn is_square_jump_active(pos: &Position, square: Square) -> bool {
-    is_field_anchor(pos, square, SpellKind::Jump)
+    jump_bb(pos).contains(square)
 }
 
 pub fn jump_targets(pos: &Position, color: Color) -> Vec<Square> {
@@ -307,6 +327,33 @@ mod tests {
         let mut gated = pos.clone();
         gated.white_spells.freeze.count = 0;
         assert!(relevant_freeze_targets(&gated, Color::White, &baseline).is_empty());
+    }
+
+    #[test]
+    fn frozen_bb_covers_the_3x3_and_not_beyond() {
+        let mut pos = Position { board: crate::board::Board::empty(), ..Position::starting() };
+        pos.fields.push(SpellField {
+            square: Square::from_str("d5").unwrap(), owner: Color::White,
+            kind: SpellKind::Freeze, expires_after_ply: pos.ply + 1,
+        });
+        let frozen = frozen_bb(&pos);
+        assert!(frozen.contains(Square::from_str("d5").unwrap()));
+        assert!(frozen.contains(Square::from_str("e6").unwrap()));
+        assert!(!frozen.contains(Square::from_str("f7").unwrap()));
+        assert_eq!(frozen.count(), 9);
+    }
+
+    #[test]
+    fn jump_bb_is_exactly_the_anchor_square() {
+        let mut pos = Position { board: crate::board::Board::empty(), ..Position::starting() };
+        pos.fields.push(SpellField {
+            square: Square::from_str("d4").unwrap(), owner: Color::White,
+            kind: SpellKind::Jump, expires_after_ply: pos.ply + 1,
+        });
+        let jump = jump_bb(&pos);
+        assert_eq!(jump, Bitboard::from_square(Square::from_str("d4").unwrap()));
+        assert!(is_square_jump_active(&pos, Square::from_str("d4").unwrap()));
+        assert!(!is_square_jump_active(&pos, Square::from_str("d5").unwrap()));
     }
 
     #[test]
