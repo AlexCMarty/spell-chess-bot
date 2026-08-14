@@ -44,7 +44,7 @@ audience: AI coding agent building a Spell Chess bot
 | Escaping check by freezing the checker | [`30-freeze.md#freezing-a-checker-dispels-the-check`](30-freeze.md#freezing-a-checker-dispels-the-check) |
 | Jump: legal targets, what transparency means | [`40-jump.md#targeting`](40-jump.md#targeting) |
 | Jump: which pieces benefit, whether the opponent benefits too | [`40-jump.md#who-can-use-the-field`](40-jump.md#who-can-use-the-field) |
-| Jump: pawn double-step, unblockable checks | [`40-jump.md#pawn-double-step`](40-jump.md#pawn-double-step) |
+| Jump: pawn double-step, jump-through-check interposition | [`40-jump.md#pawn-double-step`](40-jump.md#pawn-double-step) |
 | **How the king gets captured / how to win** | [`50-interactions.md#win-conditions`](50-interactions.md#win-conditions) |
 | Why checkmate is sometimes *not* checkmate | [`50-interactions.md#the-spell-escape-hatch`](50-interactions.md#the-spell-escape-hatch) |
 | Castling with a frozen king or frozen rook | [`50-interactions.md#castling`](50-interactions.md#castling) |
@@ -73,7 +73,8 @@ Read these before writing any move generator. Each links to its full treatment.
    → [`30`](30-freeze.md#a-frozen-piece-still-occupies-its-square)
 8. A jump field belongs to the **square**, not the piece, and is usable by **both
    players**. → [`40`](40-jump.md#who-can-use-the-field)
-9. A check delivered through a jump square **cannot be blocked**.
+9. A check delivered through a jump square **cannot be blocked by landing on the
+   jump square**; other between-squares still allow interposition.
    → [`40`](40-jump.md#checks-through-a-jump-square-are-unblockable)
 10. **The king can be captured, and it wins the game.** This is the variant's signature
     tactic, not an edge case. → [`50`](50-interactions.md#win-conditions)

@@ -205,9 +205,11 @@ Before committing to a move, evaluate whether the resulting position lets the op
 1. **Jump → king capture.** For every enemy slider (Q/R/B), test whether it would attack your
    king if exactly one occupied square on the ray between them were made transparent. If so,
    and the opponent has `jump.count > 0 && jump.lock === 0`, they win on the spot.
-2. **Jump → unblockable check.** Same construction, but where the resulting check merely
-   cannot be blocked. Your king must have a flight square, or you must be able to capture the
-   checker. See [`40`](40-jump.md#checks-through-a-jump-square-are-unblockable).
+2. **Jump → check through a transparent square.** Same construction, but where the
+   resulting check cannot be blocked **by landing on the jump square**. Other
+   between-squares still allow interposition; your king must have a flight square,
+   you must be able to capture the checker, or a piece must be able to reach a
+   non-jump square on the ray. See [`40`](40-jump.md#checks-through-a-jump-square-are-unblockable).
 3. **Freeze → mate.** If your king's only escape squares belong to a single 3×3 block
    together with your king, a freeze may immobilise it while a check is delivered.
 4. **Freeze → defence removal.** Freezing a defender removes all of its control

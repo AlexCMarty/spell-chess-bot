@@ -139,7 +139,7 @@ Turn order is 0 → 2 → 0 → 2. `turn()` returns `0` or `2`, never `1` or `3`
 | "Pieces within this area cannot move **during your opponent's next turn**" (help centre) | It also restricts **your own** pieces during **your own** move, in the same turn you cast it. → [`30`](30-freeze.md#the-zone-affects-the-caster-too) |
 | "Jump spells allow a player to jump over a specific piece" | The field is attached to a **square** and is usable by **both** players. → [`40`](40-jump.md#who-can-use-the-field) |
 | "players must wait for three turns before they can use the same spell again" | Correct, but incomplete: a spell on cooldown also **cannot rescue you from checkmate**. → [`50`](50-interactions.md#the-spell-escape-hatch) |
-| Various third-party pages: "the jump spell allows Bishops, Rooks and Queens to jump over one piece" | Directionally right, but the mechanism is square transparency, which also enables pawn double-steps and unblockable checks. → [`40`](40-jump.md) |
+| Various third-party pages: "the jump spell allows Bishops, Rooks and Queens to jump over one piece" | Directionally right, but the mechanism is square transparency, which also enables pawn double-steps and jump-through checks. → [`40`](40-jump.md) |
 
 `[VERIFIED]` The chess.com/terms page says wins come from "capturing the enemy king". The
 in-client description says "checkmate **or** king capture". The latter is correct: both

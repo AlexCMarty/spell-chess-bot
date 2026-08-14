@@ -1,8 +1,8 @@
 ---
 id: jump
 title: Spell Chess — The Jump Spell (complete)
-summary: Complete rules for the jump spell. Square transparency, legal targets, the fact that both players benefit, pawn double-steps over a jumped blocker, unblockable checks through a jump square, and king capture.
-keywords: [spell chess, jump, transparency, hop over piece, slider, x-ray, unblockable check, pawn double step, king capture, discovered attack]
+summary: Complete rules for the jump spell. Square transparency, legal targets, the fact that both players benefit, pawn double-steps over a jumped blocker, interposition on jump-through checks, and king capture.
+keywords: [spell chess, jump, transparency, hop over piece, slider, x-ray, jump-through check, interposition, pawn double step, king capture, discovered attack]
 answers:
   - What does the jump spell actually do?
   - Which squares can I target with jump?
@@ -99,20 +99,26 @@ the jump square and every square behind it.
 
 ## Checks through a jump square are unblockable
 
-`[VERIFIED]` If a check is delivered along a ray that passes through a live jump square,
-**the defender cannot interpose on that square**, and cannot interpose behind it either.
+`[CODE]` If a check is delivered along a ray that passes through a live jump square,
+**the defender cannot interpose on that jump square** — it stays transparent, so
+landing there does not break the ray. Other squares between the checker and the
+king are still legal interposition squares.
 
-`[CODE]` The engine explicitly filters candidate blocking squares, removing any square
-carrying a live jump field that will still be active.
+`[CODE]` chess.com's dests filter (`research/variants.pretty.js`) builds the
+between-squares of the check ray, then removes only those that themselves carry a
+live jump field. It does not strip the rest of the ray.
 
-`[VERIFIED]` The defender's only legal answers are therefore:
+The defender's legal answers are therefore:
 
-1. move the king, or
-2. capture the checking piece.
+1. move the king,
+2. capture the checking piece, or
+3. interpose on a between-square that is **not** a live jump square.
 
-Measured: with Black's bishop on `b4` checking `Ke1` through a jump field on `d2`, White's
-rook on `a1` had **zero** legal moves (no interposition available), while the king had
-`d1 e2 f1 f2` and White's bishop on `d2` could capture the checker on `b4`.
+Measured: with Black's bishop on `b4` checking `Ke1` through a jump field on `d2`,
+White's bishop on `d2` can play `Bd2-c3` (interposition on a non-jump square) and
+can capture the checker on `b4`. White's rook on `a1` had **zero** legal moves
+because a rook on `a1` cannot reach `c3` or `d2`, not because every interposition
+was illegal. The king had `d1 e2 f1 f2`.
 
 ## King capture — the signature tactic
 
@@ -168,7 +174,7 @@ See [`50-interactions.md#threat-detection-for-bots`](50-interactions.md#threat-d
 | Does jump help a knight or king? | `[VERIFIED]` No |
 | Can a pawn double-step over a jumped blocker? | `[VERIFIED]` Yes |
 | Can I still capture the piece on the jump square? | `[VERIFIED]` Yes |
-| Can a check through a jump square be blocked? | `[VERIFIED]` **No** |
+| Can a check through a jump square be blocked? | `[CODE]` Not by landing **on** the jump square; other between-squares still can |
 | Can I capture the king with it? | `[VERIFIED]` Yes — and it wins |
 | How long does it last? | `[VERIFIED]` My move + the opponent's next turn |
 | Does it stack with a freeze field? | `[VERIFIED]` Yes, fields are independent |

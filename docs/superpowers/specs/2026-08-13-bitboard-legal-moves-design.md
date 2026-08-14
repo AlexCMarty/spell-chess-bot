@@ -133,8 +133,9 @@ Production `legal_moves` no longer clones every candidate. Once per position:
      square): capture the checker or king move; no interposition.
    - Single slider check that does **not** pass through a live jump: capture the
      checker or interpose on the between-mask.
-   - Jump-through check: capture the checker or king move only — no interposition on
-     or behind the jump square (`rules/40-jump.md`).
+   - Jump-through check: capture the checker, king move, or interpose on a
+     between-square that is **not** a live jump square. Landing on the jump
+     square does not block (`rules/40-jump.md`).
 
 Filter:
 

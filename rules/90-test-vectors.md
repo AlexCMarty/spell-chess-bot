@@ -214,7 +214,7 @@ because pawns do not capture forward.
 
 ---
 
-## 12 — A check through a jump square cannot be blocked
+## 12 — A check through a jump square cannot be blocked on the jump square
 
 **Position:** as vector 9, Black to move.
 **Turn played:** `jump@d2 + a8a7` → SAN `jump@g5&Rd11-d10+` (the jump reveals `Bb4`'s check).
@@ -223,12 +223,13 @@ White to move, in check:
 
 ```
 e1 (white king)    →  [d1, e2, f1, f2]
-d2 (white bishop)  →  [c3, b4]           ← may capture the checker
-a1 (white rook)    →  []                 ← NO interposition possible
+d2 (white bishop)  →  [c3, b4]           ← c3 interposes; b4 captures the checker
+a1 (white rook)    →  []                 ← cannot reach c3 or d2
 ```
 
-**Asserts:** only king moves and capturing the checker answer the check; the jump square
-cannot be blocked.
+**Asserts:** landing **on** the jump square (`d2`) does not block. Interposition on other
+between-squares is legal (`Bd2-c3`). The rook on `a1` has zero moves because it cannot
+reach `c3`/`d2`, not because every interposition is illegal.
 
 ---
 

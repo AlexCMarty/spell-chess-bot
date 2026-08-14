@@ -26,7 +26,8 @@ disagree, code wins.
   pieces. Frozen pieces exert **no control at all** — no check, no guarded squares — but still
   occupy their square and can still be captured.
 - **Jump** (2 per game, 3-turn cooldown): makes one occupied square transparent to sliders, for
-  **both players**. A check delivered through a jump square cannot be blocked.
+  **both players**. Landing on a live jump square does not block a check through it; other
+  squares on the ray still can.
 - **The king can be captured, and it wins.** A spell cast at the start of your turn can create an
   attack the opponent never had a chance to answer.
 - **Checkmate is not checkmate** while the defender still holds an unlocked spell that could
