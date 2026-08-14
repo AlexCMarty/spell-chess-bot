@@ -391,8 +391,11 @@ mod tests {
         );
     }
 
+    /// Knowingly over the 5s spec bar in release (~50s on a Pi 5 starting position;
+    /// see `depth_budget_stays_bounded_on_a_realistic_board`). Kept ignored as a
+    /// skipped budget, not a passing test. Debug is slower still. Do not un-ignore.
     #[test]
-    #[ignore = "slow and misleading in a debug build; see depth_budget_stays_bounded_on_a_realistic_board"]
+    #[ignore = "knowingly red in release (~50s vs 5s on Pi 5); also slow/misleading in debug"]
     fn depth3_budget_stays_bounded_on_a_realistic_board() {
         let pos = Position::starting();
         let start = std::time::Instant::now();
