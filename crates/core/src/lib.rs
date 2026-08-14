@@ -1,6 +1,9 @@
 pub mod types;
 pub use types::*;
 
+pub mod bitboard;
+pub use bitboard::Bitboard;
+
 pub mod board;
 pub use board::Board;
 

@@ -13,6 +13,13 @@ impl Color {
             Color::Black => Color::White,
         }
     }
+
+    pub fn index(self) -> usize {
+        match self {
+            Color::White => 0,
+            Color::Black => 1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -23,6 +30,19 @@ pub enum PieceKind {
     Rook,
     Queen,
     King,
+}
+
+impl PieceKind {
+    pub fn index(self) -> usize {
+        match self {
+            PieceKind::Pawn => 0,
+            PieceKind::Knight => 1,
+            PieceKind::Bishop => 2,
+            PieceKind::Rook => 3,
+            PieceKind::Queen => 4,
+            PieceKind::King => 5,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -90,5 +110,17 @@ mod tests {
     fn color_opposite_is_involution() {
         assert_eq!(Color::White.opposite(), Color::Black);
         assert_eq!(Color::Black.opposite(), Color::White);
+    }
+
+    #[test]
+    fn color_and_piece_kind_indices_are_dense() {
+        assert_eq!(Color::White.index(), 0);
+        assert_eq!(Color::Black.index(), 1);
+        assert_eq!(PieceKind::Pawn.index(), 0);
+        assert_eq!(PieceKind::Knight.index(), 1);
+        assert_eq!(PieceKind::Bishop.index(), 2);
+        assert_eq!(PieceKind::Rook.index(), 3);
+        assert_eq!(PieceKind::Queen.index(), 4);
+        assert_eq!(PieceKind::King.index(), 5);
     }
 }
