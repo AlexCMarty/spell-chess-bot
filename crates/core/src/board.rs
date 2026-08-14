@@ -56,7 +56,7 @@ impl Board {
         if let Some(old) = self.squares[sq.0 as usize] {
             self.by_color[old.color.index()] = self.by_color[old.color.index()].without(sq);
             self.by_kind[old.kind.index()] = self.by_kind[old.kind.index()].without(sq);
-            if old.kind == PieceKind::King {
+            if old.kind == PieceKind::King && self.kings[old.color.index()] == Some(sq) {
                 self.kings[old.color.index()] = None;
             }
         }
@@ -156,5 +156,28 @@ mod tests {
         assert!(b.color_bb(Color::White).contains(Square::from_str("d4").unwrap()));
         assert!(b.kind_bb(PieceKind::Rook).contains(Square::from_str("d4").unwrap()));
         assert!(!b.kind_bb(PieceKind::King).contains(Square::from_str("d4").unwrap()));
+    }
+
+    #[test]
+    fn relocating_a_king_keeps_the_cache_in_either_order() {
+        let king = Piece { color: Color::White, kind: PieceKind::King };
+        let e1 = Square::from_str("e1").unwrap();
+        let e2 = Square::from_str("e2").unwrap();
+
+        let mut dest_then_origin = Board::empty();
+        dest_then_origin.set(e1, Some(king));
+        dest_then_origin.set(e2, Some(king));
+        dest_then_origin.set(e1, None);
+        assert_eq!(dest_then_origin.king_square(Color::White), Some(e2));
+        assert_eq!(dest_then_origin.get(e2), Some(king));
+        assert_eq!(dest_then_origin.get(e1), None);
+
+        let mut origin_then_dest = Board::empty();
+        origin_then_dest.set(e1, Some(king));
+        origin_then_dest.set(e1, None);
+        origin_then_dest.set(e2, Some(king));
+        assert_eq!(origin_then_dest.king_square(Color::White), Some(e2));
+        assert_eq!(origin_then_dest.get(e2), Some(king));
+        assert_eq!(origin_then_dest.get(e1), None);
     }
 }
