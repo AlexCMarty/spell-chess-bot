@@ -77,7 +77,7 @@ pub fn legal_moves(pos: &Position) -> Vec<PieceMove> {
     let slider_occ = occ.minus(jump);
     let checkers = checkers_of(pos, king_sq, enemy, frozen, slider_occ);
     let checker_count = checkers.count();
-    let pins = pins_of(pos, king_sq, mover, frozen, slider_occ);
+    let pins = pins_of(pos, king_sq, mover, frozen, jump);
 
     pseudo_legal_moves(pos)
         .into_iter()
@@ -105,10 +105,15 @@ pub fn legal_moves(pos: &Position) -> Vec<PieceMove> {
                 if !ray.contains(mv.to) {
                     return false;
                 }
-                // Landing on a jump square stays transparent, so this does not
-                // keep blocking the pinner (clone-and-rescan rejects it).
+                // Landing on a jump square stays transparent. Capturing a jumped
+                // *pinner* can still be legal; capturing a jumped *between* piece
+                // is not. Clone-and-rescan distinguishes those.
                 if jump.contains(mv.to) {
-                    return false;
+                    let after = apply_move_only(pos, mv);
+                    return after
+                        .board
+                        .king_square(mover)
+                        .is_none_or(|k| !crate::attacks::is_square_attacked(&after, k, enemy));
                 }
             }
             if checker_count == 1 {
@@ -141,49 +146,52 @@ struct PinMap {
     rays: [Bitboard; 64],
 }
 
-fn first_two_on_ray(king: Square, slider_occ: Bitboard, dir: (i8, i8)) -> (Option<Square>, Option<Square>) {
-    let mut first = None;
-    let mut f = king.file() as i8 + dir.0;
-    let mut r = king.rank() as i8 + dir.1;
-    while (0..8).contains(&f) && (0..8).contains(&r) {
-        let sq = Square::new(f as u8, r as u8);
-        if slider_occ.contains(sq) {
-            if first.is_none() {
-                first = Some(sq);
-            } else {
-                return (first, Some(sq));
-            }
-        }
-        f += dir.0;
-        r += dir.1;
+fn slider_matches_dir(kind: PieceKind, dir: (i8, i8)) -> bool {
+    match kind {
+        PieceKind::Queen => true,
+        PieceKind::Rook => dir.0 == 0 || dir.1 == 0,
+        PieceKind::Bishop => dir.0 != 0 && dir.1 != 0,
+        _ => false,
     }
-    (first, None)
 }
 
-fn pins_of(pos: &Position, king: Square, us: Color, frozen: Bitboard, slider_occ: Bitboard) -> PinMap {
+fn pins_of(pos: &Position, king: Square, us: Color, frozen: Bitboard, jump: Bitboard) -> PinMap {
     let mut pinned = Bitboard::EMPTY;
     let mut rays = [Bitboard::EMPTY; 64];
     let them = us.opposite();
     for dir in crate::rays::ROOK_DIRS.iter().chain(crate::rays::BISHOP_DIRS.iter()) {
-        let (Some(blocker), Some(second)) = first_two_on_ray(king, slider_occ, *dir) else { continue };
-        if pos.board.get(blocker).is_none_or(|p| p.color != us) {
-            continue;
+        let mut blocker: Option<Square> = None;
+        let mut f = king.file() as i8 + dir.0;
+        let mut r = king.rank() as i8 + dir.1;
+        while (0..8).contains(&f) && (0..8).contains(&r) {
+            let sq = Square::new(f as u8, r as u8);
+            if let Some(piece) = pos.board.get(sq) {
+                if blocker.is_none() {
+                    if jump.contains(sq) {
+                        // Transparent: not a blocker. Keep walking.
+                    } else if piece.color == us {
+                        blocker = Some(sq);
+                    } else {
+                        break; // opaque enemy first: check, not pin
+                    }
+                } else {
+                    let is_pinner = piece.color == them
+                        && !frozen.contains(sq)
+                        && slider_matches_dir(piece.kind, *dir);
+                    if is_pinner {
+                        let b = blocker.unwrap();
+                        pinned = pinned.with(b);
+                        rays[b.0 as usize] = crate::rays::between(king, sq).with(sq);
+                        break;
+                    }
+                    if !jump.contains(sq) {
+                        break; // opaque non-pinner ends the ray
+                    }
+                }
+            }
+            f += dir.0;
+            r += dir.1;
         }
-        let Some(p) = pos.board.get(second) else { continue };
-        if p.color != them || frozen.contains(second) {
-            continue;
-        }
-        let slider_ok = match p.kind {
-            PieceKind::Queen => true,
-            PieceKind::Rook => dir.0 == 0 || dir.1 == 0,
-            PieceKind::Bishop => dir.0 != 0 && dir.1 != 0,
-            _ => false,
-        };
-        if !slider_ok {
-            continue;
-        }
-        pinned = pinned.with(blocker);
-        rays[blocker.0 as usize] = crate::rays::between(king, second).with(second);
     }
     PinMap { pinned, rays }
 }
@@ -207,10 +215,9 @@ fn evasion_allows(pos: &Position, king: Square, checker: Square, dest: Square, j
         return false;
     }
     let between = crate::rays::between(king, checker);
-    if !between.intersect(jump).is_empty() {
-        return false;
-    }
-    between.contains(dest)
+    // A jump square on the ray stays transparent, so landing there does not
+    // block. Other between-squares still do (vector 12: Bd2-c3 is legal).
+    between.contains(dest) && !jump.contains(dest)
 }
 
 fn king_dest_safe(pos: &Position, king_from: Square, dest: Square, enemy: Color) -> bool {
@@ -481,7 +488,9 @@ mod tests {
             kind: crate::position::SpellKind::Jump, expires_after_ply: pos.ply + 1,
         });
         assert!(dests(&pos, Square::from_str("a1").unwrap()).is_empty());
-        assert!(dests(&pos, Square::from_str("d2").unwrap()).contains(&Square::from_str("b4").unwrap()));
+        let d2 = dests(&pos, Square::from_str("d2").unwrap());
+        assert!(d2.contains(&Square::from_str("c3").unwrap()));
+        assert!(d2.contains(&Square::from_str("b4").unwrap()));
         let king_dests = dests(&pos, Square::from_str("e1").unwrap());
         assert!(!king_dests.is_empty());
     }
