@@ -367,18 +367,16 @@ mod tests {
         );
     }
 
-    /// Regression test for the branching-factor fix: `go --depth N` is unbounded by
-    /// design (Budget::Depth passes no deadline), and before relevance-filtered
-    /// candidate generation, depth 1 alone measured ~54s on the fully-populated
-    /// starting position. Measured after the fix in a release build: depth 1 ~2.8s,
-    /// depth 2 ~33s -- the filter helps most in sparser positions (see the design doc),
-    /// so the dense opening still isn't cheap at higher depths. This pins down the
-    /// exact regression that was reported: depth 1 specifically must now be fast.
+    /// Regression guard for search speed on the starting position after the bitboard
+    /// legal-move rewrite (see
+    /// `docs/superpowers/specs/2026-08-13-bitboard-legal-moves-design.md`).
+    /// Measured in a release build on a Pi 5: depth 1 ~0.33s, depth 2 ~4.0s,
+    /// depth 3 ~50s (depth 3 still misses the 5s spec bar; see
+    /// `depth3_budget_stays_bounded_on_a_realistic_board`).
     ///
     /// The bound is tuned for a release build; debug-build overhead (no inlining, no
     /// bounds-check elision, more expensive allocation) swamps the algorithmic win here
-    /// almost entirely -- a debug build measures ~53s, indistinguishable from the old
-    /// unfiltered cost. Run with `cargo test -p spellchess-search --release -- --ignored`.
+    /// almost entirely. Run with `cargo test -p spellchess-search --release -- --ignored`.
     #[test]
     #[ignore = "slow and misleading in a debug build; see doc comment"]
     fn depth_budget_stays_bounded_on_a_realistic_board() {
@@ -388,8 +386,22 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(result.is_some(), "a legal turn exists in the starting position");
         assert!(
-            elapsed < Duration::from_secs(15),
-            "depth-1 search on a fully-populated board must stay well under the old ~54s, took {elapsed:?}",
+            elapsed < Duration::from_secs(1),
+            "depth-1 search on the starting position must finish in under 1s, took {elapsed:?}",
+        );
+    }
+
+    #[test]
+    #[ignore = "slow and misleading in a debug build; see depth_budget_stays_bounded_on_a_realistic_board"]
+    fn depth3_budget_stays_bounded_on_a_realistic_board() {
+        let pos = Position::starting();
+        let start = std::time::Instant::now();
+        let result = search(&pos, Budget::Depth(3));
+        let elapsed = start.elapsed();
+        assert!(result.is_some(), "a legal turn exists in the starting position");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "depth-3 search on the starting position must finish in under 5s, took {elapsed:?}",
         );
     }
 
