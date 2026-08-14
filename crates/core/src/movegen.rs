@@ -66,8 +66,9 @@ fn pawn_moves(pos: &Position, sq: Square, color: Color, jump: Bitboard) -> Vec<P
         add_pawn_move(&mut out, sq, at(r + dir), false, promo_rank);
     }
 
-    // double push -- intermediate-square check is independent of the single-push
-    // result so Task 11 can add jump-transparency here without touching this shape.
+    // Double push: the intermediate square may be empty or carry a live jump field
+    // (transparent). The landing square must still be empty. Independent of the
+    // single-push result so a jumped blocker on `mid` still allows the double step.
     if r == start_rank {
         let mid = at(r + dir);
         let landing = at(r + 2 * dir);

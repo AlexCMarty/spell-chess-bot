@@ -105,8 +105,8 @@ pub fn between(a: Square, b: Square) -> Bitboard {
 }
 
 /// Walks a ray from `from` in direction `dir`, stopping after the first occupied
-/// square (inclusive). Task 11 changes the stop condition so a square carrying a
-/// live jump field does not stop the ray.
+/// square (inclusive). Occupancy already subtracts live jump squares, so the ray
+/// continues through them as if they were empty.
 pub fn walk_ray(pos: &Position, from: Square, dir: (i8, i8)) -> Vec<Square> {
     let occ = pos.board.occupancy().minus(crate::spells::jump_bb(pos));
     let mut out = Vec::new();
