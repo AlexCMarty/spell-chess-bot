@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use crate::bitboard::Bitboard;
 use crate::movegen::PieceMove;
 use crate::position::{Position, SpellField, SpellKind};
 use crate::types::{Color, PieceKind, Square};
@@ -16,6 +17,36 @@ pub fn freeze_zone(target: Square) -> Vec<Square> {
     }
     out
 }
+
+const fn freeze_zone_bits(idx: u8) -> u64 {
+    let tf = (idx % 8) as i8;
+    let tr = (idx / 8) as i8;
+    let mut bits = 0u64;
+    let mut df = -1i8;
+    while df <= 1 {
+        let mut dr = -1i8;
+        while dr <= 1 {
+            let f = tf + df;
+            let r = tr + dr;
+            if f >= 0 && f < 8 && r >= 0 && r < 8 {
+                bits |= 1u64 << (r * 8 + f) as u32;
+            }
+            dr += 1;
+        }
+        df += 1;
+    }
+    bits
+}
+
+pub const FREEZE_ZONE: [Bitboard; 64] = {
+    let mut table = [Bitboard(0); 64];
+    let mut i = 0;
+    while i < 64 {
+        table[i] = Bitboard(freeze_zone_bits(i as u8));
+        i += 1;
+    }
+    table
+};
 
 fn field_active(pos: &Position, field: &SpellField) -> bool {
     pos.ply <= field.expires_after_ply
@@ -276,5 +307,17 @@ mod tests {
         let mut gated = pos.clone();
         gated.white_spells.freeze.count = 0;
         assert!(relevant_freeze_targets(&gated, Color::White, &baseline).is_empty());
+    }
+
+    #[test]
+    fn freeze_zone_table_matches_freeze_zone_for_every_square() {
+        for i in 0..64u8 {
+            let sq = Square(i);
+            let mut from_vec = crate::bitboard::Bitboard::EMPTY;
+            for z in freeze_zone(sq) {
+                from_vec = from_vec.with(z);
+            }
+            assert_eq!(FREEZE_ZONE[i as usize], from_vec, "mismatch at {sq}");
+        }
     }
 }

@@ -57,7 +57,7 @@ pub struct SpellField {
     pub expires_after_ply: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Position {
     pub board: Board,
     pub side_to_move: Color,
@@ -117,5 +117,13 @@ mod tests {
         assert!(SpellCounter { count: 1, lock: 0 }.castable());
         assert!(!SpellCounter { count: 0, lock: 0 }.castable());
         assert!(!SpellCounter { count: 1, lock: 2 }.castable());
+    }
+
+    #[test]
+    fn position_is_copy() {
+        let a = Position::starting();
+        let b = a;
+        assert_eq!(a.side_to_move, b.side_to_move);
+        assert_eq!(a.board.king_square(Color::White), b.board.king_square(Color::White));
     }
 }
