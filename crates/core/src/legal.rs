@@ -1,3 +1,4 @@
+use crate::bitboard::Bitboard;
 use crate::position::{Position, SpellField, SpellKind};
 use crate::movegen::{pseudo_legal_moves, PieceMove};
 use crate::types::{Color, Piece, PieceKind, Square};
@@ -66,35 +67,161 @@ pub fn apply_move_only(pos: &Position, mv: &PieceMove) -> Position {
 
 pub fn legal_moves(pos: &Position) -> Vec<PieceMove> {
     let mover = pos.side_to_move;
+    let enemy = mover.opposite();
+    let Some(king_sq) = pos.board.king_square(mover) else {
+        return Vec::new();
+    };
+    let frozen = crate::spells::frozen_bb(pos);
+    let jump = crate::spells::jump_bb(pos);
+    let occ = pos.board.occupancy();
+    let slider_occ = occ.minus(jump);
+    let checkers = checkers_of(pos, king_sq, enemy, frozen, slider_occ);
+    let checker_count = checkers.count();
+    let pins = pins_of(pos, king_sq, mover, frozen, slider_occ);
+
     pseudo_legal_moves(pos)
         .into_iter()
         .filter(|mv| {
-            let after = apply_move_only(pos, mv);
-            if after.board.king_square(mover.opposite()).is_none() {
-                // This move captures the enemy king outright, ending the game
-                // immediately -- so it's legal even if the mover's own king is left
-                // in check (single, double, or otherwise -- a pre-existing double
-                // check doesn't block it either, see rules/50-interactions.md
-                // #win-conditions), UNLESS *this exact move* is what pushes the
-                // mover's own checker count higher than it already was and past 1 --
-                // i.e. the capturing piece was itself blocking a different attacker,
-                // and unpinning it to reach the enemy king discovers a second,
-                // simultaneous check that didn't already exist. Orthodox rules
-                // require a king move to answer double check; that survives the
-                // king-capture exemption only in the "you just created this problem
-                // yourself" case, not the "you already had this problem" case.
-                let before_sq = pos.board.king_square(mover).expect("mover's king must be on the board before its own move");
-                let after_sq = after.board.king_square(mover).expect("mover's own king must still be on the board");
-                let before_count = crate::attacks::attacker_count(pos, before_sq, mover.opposite());
-                let after_count = crate::attacks::attacker_count(&after, after_sq, mover.opposite());
+            let dest_piece = pos.board.get(mv.to);
+            if dest_piece.is_some_and(|p| p.kind == PieceKind::King && p.color == enemy) {
+                let after = apply_move_only(pos, mv);
+                let after_sq = after.board.king_square(mover).expect("own king remains");
+                let before_count = crate::attacks::attacker_count(pos, king_sq, enemy);
+                let after_count = crate::attacks::attacker_count(&after, after_sq, enemy);
                 return after_count <= before_count.max(1);
             }
-            match after.board.king_square(mover) {
-                Some(king_sq) => !crate::attacks::is_square_attacked(&after, king_sq, mover.opposite()),
-                None => true, // this move itself captured the enemy king on a prior ply; not reachable here
+            if mv.is_en_passant {
+                let after = apply_move_only(pos, mv);
+                return !crate::attacks::is_square_attacked(&after, after.board.king_square(mover).unwrap(), enemy);
             }
+            let mover_piece = pos.board.get(mv.from).unwrap();
+            if mover_piece.kind == PieceKind::King {
+                return king_dest_safe(pos, king_sq, mv.to, enemy);
+            }
+            if checker_count >= 2 {
+                return false;
+            }
+            if let Some(ray) = pin_ray(&pins, mv.from) {
+                if !ray.contains(mv.to) {
+                    return false;
+                }
+                // Landing on a jump square stays transparent, so this does not
+                // keep blocking the pinner (clone-and-rescan rejects it).
+                if jump.contains(mv.to) {
+                    return false;
+                }
+            }
+            if checker_count == 1 {
+                let checker = checkers.iter().next().unwrap();
+                return evasion_allows(pos, king_sq, checker, mv.to, jump);
+            }
+            true
         })
         .collect()
+}
+
+fn checkers_of(pos: &Position, king: Square, by: Color, frozen: Bitboard, slider_occ: Bitboard) -> Bitboard {
+    let idx = king.0 as usize;
+    let mut acc = Bitboard::EMPTY;
+    let pawns = pos.board.color_bb(by).intersect(pos.board.kind_bb(PieceKind::Pawn)).minus(frozen);
+    acc = acc.union(pawns.intersect(crate::rays::PAWN_ATTACKS[by.opposite().index()][idx]));
+    let knights = pos.board.color_bb(by).intersect(pos.board.kind_bb(PieceKind::Knight)).minus(frozen);
+    acc = acc.union(knights.intersect(crate::rays::KNIGHT_ATTACKS[idx]));
+    let king_bb = pos.board.color_bb(by).intersect(pos.board.kind_bb(PieceKind::King)).minus(frozen);
+    acc = acc.union(king_bb.intersect(crate::rays::KING_ATTACKS[idx]));
+    let bq = pos.board.color_bb(by).intersect(pos.board.kind_bb(PieceKind::Bishop).union(pos.board.kind_bb(PieceKind::Queen))).minus(frozen);
+    acc = acc.union(bq.intersect(crate::rays::bishop_attacks(king, slider_occ)));
+    let rq = pos.board.color_bb(by).intersect(pos.board.kind_bb(PieceKind::Rook).union(pos.board.kind_bb(PieceKind::Queen))).minus(frozen);
+    acc = acc.union(rq.intersect(crate::rays::rook_attacks(king, slider_occ)));
+    acc
+}
+
+struct PinMap {
+    pinned: Bitboard,
+    rays: [Bitboard; 64],
+}
+
+fn first_two_on_ray(king: Square, slider_occ: Bitboard, dir: (i8, i8)) -> (Option<Square>, Option<Square>) {
+    let mut first = None;
+    let mut f = king.file() as i8 + dir.0;
+    let mut r = king.rank() as i8 + dir.1;
+    while (0..8).contains(&f) && (0..8).contains(&r) {
+        let sq = Square::new(f as u8, r as u8);
+        if slider_occ.contains(sq) {
+            if first.is_none() {
+                first = Some(sq);
+            } else {
+                return (first, Some(sq));
+            }
+        }
+        f += dir.0;
+        r += dir.1;
+    }
+    (first, None)
+}
+
+fn pins_of(pos: &Position, king: Square, us: Color, frozen: Bitboard, slider_occ: Bitboard) -> PinMap {
+    let mut pinned = Bitboard::EMPTY;
+    let mut rays = [Bitboard::EMPTY; 64];
+    let them = us.opposite();
+    for dir in crate::rays::ROOK_DIRS.iter().chain(crate::rays::BISHOP_DIRS.iter()) {
+        let (Some(blocker), Some(second)) = first_two_on_ray(king, slider_occ, *dir) else { continue };
+        if pos.board.get(blocker).is_none_or(|p| p.color != us) {
+            continue;
+        }
+        let Some(p) = pos.board.get(second) else { continue };
+        if p.color != them || frozen.contains(second) {
+            continue;
+        }
+        let slider_ok = match p.kind {
+            PieceKind::Queen => true,
+            PieceKind::Rook => dir.0 == 0 || dir.1 == 0,
+            PieceKind::Bishop => dir.0 != 0 && dir.1 != 0,
+            _ => false,
+        };
+        if !slider_ok {
+            continue;
+        }
+        pinned = pinned.with(blocker);
+        rays[blocker.0 as usize] = crate::rays::between(king, second).with(second);
+    }
+    PinMap { pinned, rays }
+}
+
+fn pin_ray(pins: &PinMap, from: Square) -> Option<Bitboard> {
+    if pins.pinned.contains(from) {
+        Some(pins.rays[from.0 as usize])
+    } else {
+        None
+    }
+}
+
+fn evasion_allows(pos: &Position, king: Square, checker: Square, dest: Square, jump: Bitboard) -> bool {
+    if dest == checker {
+        return true;
+    }
+    let Some(piece) = pos.board.get(checker) else { return false };
+    let contact = matches!(piece.kind, PieceKind::Knight | PieceKind::Pawn | PieceKind::King)
+        || crate::rays::between(king, checker).is_empty();
+    if contact {
+        return false;
+    }
+    let between = crate::rays::between(king, checker);
+    if !between.intersect(jump).is_empty() {
+        return false;
+    }
+    between.contains(dest)
+}
+
+fn king_dest_safe(pos: &Position, king_from: Square, dest: Square, enemy: Color) -> bool {
+    // Copy is cheap; clearing the king (and a captured piece on dest) lets
+    // is_square_attacked x-ray the vacated square. Frozen/jump come from probe.fields.
+    let mut probe = *pos;
+    probe.board.set(king_from, None);
+    if pos.board.get(dest).is_some() {
+        probe.board.set(dest, None);
+    }
+    !crate::attacks::is_square_attacked(&probe, dest, enemy)
 }
 
 fn position_with_field(pos: &Position, cast: SpellCast) -> Position {

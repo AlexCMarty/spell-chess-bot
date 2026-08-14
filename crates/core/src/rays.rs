@@ -86,6 +86,24 @@ pub fn bishop_attacks(from: Square, occ: Bitboard) -> Bitboard {
     acc
 }
 
+pub fn between(a: Square, b: Square) -> Bitboard {
+    let df = b.file() as i8 - a.file() as i8;
+    let dr = b.rank() as i8 - a.rank() as i8;
+    if df == 0 && dr == 0 {
+        return Bitboard::EMPTY;
+    }
+    let on_diag = df.abs() == dr.abs();
+    let on_ortho = df == 0 || dr == 0;
+    if !on_diag && !on_ortho {
+        return Bitboard::EMPTY;
+    }
+    let step_f = df.signum();
+    let step_r = dr.signum();
+    let occ_stop = Bitboard::from_square(b);
+    let ray = ray_attacks(a, occ_stop, (step_f, step_r));
+    ray.without(b)
+}
+
 /// Walks a ray from `from` in direction `dir`, stopping after the first occupied
 /// square (inclusive). Task 11 changes the stop condition so a square carrying a
 /// live jump field does not stop the ray.
