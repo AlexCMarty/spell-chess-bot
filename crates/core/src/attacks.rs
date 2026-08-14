@@ -1,59 +1,54 @@
+use crate::bitboard::Bitboard;
 use crate::position::Position;
-use crate::rays::{walk_ray, BISHOP_DIRS, ROOK_DIRS};
-use crate::types::{Color, Piece, PieceKind, Square};
+use crate::rays::{bishop_attacks, rook_attacks, KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKS};
+use crate::types::{Color, PieceKind, Square};
 
-const KNIGHT_OFFSETS: [(i8, i8); 8] = [(1, 2), (2, 1), (2, -1), (1, -2), (-1, -2), (-2, -1), (-2, 1), (-1, 2)];
-const KING_OFFSETS: [(i8, i8); 8] = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)];
+fn slider_occ(pos: &Position) -> Bitboard {
+    pos.board.occupancy().minus(crate::spells::jump_bb(pos))
+}
 
-fn has(pos: &Position, sq: Square, by: Color, kind: PieceKind) -> bool {
-    pos.board.get(sq) == Some(Piece { color: by, kind })
+fn unfrozen(pos: &Position, color: Color, kind: PieceKind) -> Bitboard {
+    pos.board.color_bb(color)
+        .intersect(pos.board.kind_bb(kind))
+        .minus(crate::spells::frozen_bb(pos))
+}
+
+fn collect_attackers(pos: &Position, square: Square, by: Color, stop_at_one: bool) -> u32 {
+    let mut count = 0u32;
+    let occ = slider_occ(pos);
+    let idx = square.0 as usize;
+    // Reverse pawn attacks: PAWN_ATTACKS[White][from] is NE/NW of from, so the white
+    // pawns that attack `square` sit on PAWN_ATTACKS[Black][square], and vice versa.
+    count += unfrozen(pos, by, PieceKind::Pawn)
+        .intersect(PAWN_ATTACKS[by.opposite().index()][idx])
+        .count();
+    if stop_at_one && count > 0 {
+        return count;
+    }
+
+    count += unfrozen(pos, by, PieceKind::Knight).intersect(KNIGHT_ATTACKS[idx]).count();
+    if stop_at_one && count > 0 {
+        return count;
+    }
+
+    count += unfrozen(pos, by, PieceKind::King).intersect(KING_ATTACKS[idx]).count();
+    if stop_at_one && count > 0 {
+        return count;
+    }
+
+    let bq = unfrozen(pos, by, PieceKind::Bishop).union(unfrozen(pos, by, PieceKind::Queen));
+    count += bq.intersect(bishop_attacks(square, occ)).count();
+    if stop_at_one && count > 0 {
+        return count;
+    }
+
+    let rq = unfrozen(pos, by, PieceKind::Rook).union(unfrozen(pos, by, PieceKind::Queen));
+    count += rq.intersect(rook_attacks(square, occ)).count();
+    count
 }
 
 pub fn is_square_attacked(pos: &Position, square: Square, by: Color) -> bool {
-    // pawns: an attacker sits one rank behind the target, from the attacker's own push direction
-    let pawn_dir: i8 = if by == Color::White { -1 } else { 1 };
-    for df in [-1i8, 1i8] {
-        let (f, r) = (square.file() as i8 + df, square.rank() as i8 + pawn_dir);
-        if (0..8).contains(&f) && (0..8).contains(&r) {
-            let sq = Square::new(f as u8, r as u8);
-            if has(pos, sq, by, PieceKind::Pawn) && !crate::spells::is_square_frozen(pos, sq) {
-                return true;
-            }
-        }
-    }
-    for (df, dr) in KNIGHT_OFFSETS {
-        let (f, r) = (square.file() as i8 + df, square.rank() as i8 + dr);
-        if (0..8).contains(&f) && (0..8).contains(&r) {
-            let sq = Square::new(f as u8, r as u8);
-            if has(pos, sq, by, PieceKind::Knight) && !crate::spells::is_square_frozen(pos, sq) {
-                return true;
-            }
-        }
-    }
-    for (df, dr) in KING_OFFSETS {
-        let (f, r) = (square.file() as i8 + df, square.rank() as i8 + dr);
-        if (0..8).contains(&f) && (0..8).contains(&r) {
-            let sq = Square::new(f as u8, r as u8);
-            if has(pos, sq, by, PieceKind::King) && !crate::spells::is_square_frozen(pos, sq) {
-                return true;
-            }
-        }
-    }
-    for dir in ROOK_DIRS {
-        if let Some(&sq) = walk_ray(pos, square, dir).last() {
-            if !crate::spells::is_square_frozen(pos, sq) && (has(pos, sq, by, PieceKind::Rook) || has(pos, sq, by, PieceKind::Queen)) {
-                return true;
-            }
-        }
-    }
-    for dir in BISHOP_DIRS {
-        if let Some(&sq) = walk_ray(pos, square, dir).last() {
-            if !crate::spells::is_square_frozen(pos, sq) && (has(pos, sq, by, PieceKind::Bishop) || has(pos, sq, by, PieceKind::Queen)) {
-                return true;
-            }
-        }
-    }
-    false
+    collect_attackers(pos, square, by, true) > 0
 }
 
 /// Counts distinct attackers of `square`. Only used on the rare king-capture path in
@@ -61,50 +56,7 @@ pub fn is_square_attacked(pos: &Position, square: Square, by: Color) -> bool {
 /// plain boolean `is_square_attacked` can't, so this isn't used on the movegen hot
 /// path and doesn't bother with early-exit.
 pub fn attacker_count(pos: &Position, square: Square, by: Color) -> u32 {
-    let mut count = 0u32;
-    let pawn_dir: i8 = if by == Color::White { -1 } else { 1 };
-    for df in [-1i8, 1i8] {
-        let (f, r) = (square.file() as i8 + df, square.rank() as i8 + pawn_dir);
-        if (0..8).contains(&f) && (0..8).contains(&r) {
-            let sq = Square::new(f as u8, r as u8);
-            if has(pos, sq, by, PieceKind::Pawn) && !crate::spells::is_square_frozen(pos, sq) {
-                count += 1;
-            }
-        }
-    }
-    for (df, dr) in KNIGHT_OFFSETS {
-        let (f, r) = (square.file() as i8 + df, square.rank() as i8 + dr);
-        if (0..8).contains(&f) && (0..8).contains(&r) {
-            let sq = Square::new(f as u8, r as u8);
-            if has(pos, sq, by, PieceKind::Knight) && !crate::spells::is_square_frozen(pos, sq) {
-                count += 1;
-            }
-        }
-    }
-    for (df, dr) in KING_OFFSETS {
-        let (f, r) = (square.file() as i8 + df, square.rank() as i8 + dr);
-        if (0..8).contains(&f) && (0..8).contains(&r) {
-            let sq = Square::new(f as u8, r as u8);
-            if has(pos, sq, by, PieceKind::King) && !crate::spells::is_square_frozen(pos, sq) {
-                count += 1;
-            }
-        }
-    }
-    for dir in ROOK_DIRS {
-        if let Some(&sq) = walk_ray(pos, square, dir).last() {
-            if !crate::spells::is_square_frozen(pos, sq) && (has(pos, sq, by, PieceKind::Rook) || has(pos, sq, by, PieceKind::Queen)) {
-                count += 1;
-            }
-        }
-    }
-    for dir in BISHOP_DIRS {
-        if let Some(&sq) = walk_ray(pos, square, dir).last() {
-            if !crate::spells::is_square_frozen(pos, sq) && (has(pos, sq, by, PieceKind::Bishop) || has(pos, sq, by, PieceKind::Queen)) {
-                count += 1;
-            }
-        }
-    }
-    count
+    collect_attackers(pos, square, by, false)
 }
 
 #[cfg(test)]
@@ -112,7 +64,7 @@ mod tests {
     use super::*;
     use crate::board::Board;
     use crate::position::Position;
-    use crate::types::PieceKind;
+    use crate::types::{Color, Piece, PieceKind};
 
     #[test]
     fn rook_attacks_along_clear_file() {
@@ -147,5 +99,18 @@ mod tests {
             kind: crate::position::SpellKind::Freeze, expires_after_ply: pos.ply + 1,
         });
         assert!(!is_square_attacked(&pos, Square::from_str("d4").unwrap(), Color::White));
+    }
+
+    #[test]
+    fn slider_on_a_jump_square_still_attacks() {
+        // Walk-from-target + last() used to see through the jumper and miss it.
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("d4").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.fields.push(crate::position::SpellField {
+            square: Square::from_str("d4").unwrap(), owner: Color::White,
+            kind: crate::position::SpellKind::Jump, expires_after_ply: pos.ply + 1,
+        });
+        assert!(is_square_attacked(&pos, Square::from_str("d8").unwrap(), Color::White));
+        assert_eq!(attacker_count(&pos, Square::from_str("d8").unwrap(), Color::White), 1);
     }
 }
