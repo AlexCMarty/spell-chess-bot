@@ -1,4 +1,6 @@
+use crate::bitboard::Bitboard;
 use crate::position::Position;
+use crate::rays::{bishop_attacks, rook_attacks, KING_ATTACKS, KNIGHT_ATTACKS};
 use crate::types::{Color, Piece, PieceKind, Square};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,28 +39,8 @@ impl PieceMove {
     }
 }
 
-const KNIGHT_OFFSETS: [(i8, i8); 8] = [(1, 2), (2, 1), (2, -1), (1, -2), (-1, -2), (-2, -1), (-2, 1), (-1, 2)];
-const KING_OFFSETS: [(i8, i8); 8] = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)];
-
 fn in_bounds(f: i8, r: i8) -> bool {
     (0..8).contains(&f) && (0..8).contains(&r)
-}
-
-fn leaper_moves(pos: &Position, sq: Square, offsets: &[(i8, i8)], color: Color) -> Vec<PieceMove> {
-    let mut out = Vec::new();
-    for (df, dr) in offsets {
-        let f = sq.file() as i8 + df;
-        let r = sq.rank() as i8 + dr;
-        if !in_bounds(f, r) {
-            continue;
-        }
-        let dest = Square::new(f as u8, r as u8);
-        match pos.board.get(dest) {
-            Some(p) if p.color == color => {}
-            _ => out.push(PieceMove::quiet(sq, dest)),
-        }
-    }
-    out
 }
 
 fn add_pawn_move(out: &mut Vec<PieceMove>, from: Square, to: Square, is_en_passant: bool, promo_rank: u8) {
@@ -71,7 +53,7 @@ fn add_pawn_move(out: &mut Vec<PieceMove>, from: Square, to: Square, is_en_passa
     }
 }
 
-fn pawn_moves(pos: &Position, sq: Square, color: Color) -> Vec<PieceMove> {
+fn pawn_moves(pos: &Position, sq: Square, color: Color, jump: Bitboard) -> Vec<PieceMove> {
     let mut out = Vec::new();
     let dir: i8 = if color == Color::White { 1 } else { -1 };
     let start_rank: i8 = if color == Color::White { 1 } else { 6 };
@@ -89,7 +71,7 @@ fn pawn_moves(pos: &Position, sq: Square, color: Color) -> Vec<PieceMove> {
     if r == start_rank {
         let mid = at(r + dir);
         let landing = at(r + 2 * dir);
-        let mid_passable = pos.board.get(mid).is_none() || crate::spells::is_square_jump_active(pos, mid);
+        let mid_passable = pos.board.get(mid).is_none() || jump.contains(mid);
         if mid_passable && pos.board.get(landing).is_none() {
             out.push(PieceMove::quiet(sq, landing));
         }
@@ -114,17 +96,15 @@ fn pawn_moves(pos: &Position, sq: Square, color: Color) -> Vec<PieceMove> {
     out
 }
 
-fn slide_moves(pos: &Position, sq: Square, dirs: &[(i8, i8)], color: Color) -> Vec<PieceMove> {
-    let mut out = Vec::new();
-    for &dir in dirs {
-        for dest in crate::rays::walk_ray(pos, sq, dir) {
-            match pos.board.get(dest) {
-                Some(p) if p.color == color => {}
-                _ => out.push(PieceMove::quiet(sq, dest)),
-            }
-        }
+fn slide_dests(from: Square, own: Bitboard, slider_occ: Bitboard, bishop: bool, rook: bool) -> Vec<PieceMove> {
+    let mut attacks = Bitboard::EMPTY;
+    if bishop {
+        attacks = attacks.union(bishop_attacks(from, slider_occ));
     }
-    out
+    if rook {
+        attacks = attacks.union(rook_attacks(from, slider_occ));
+    }
+    attacks.minus(own).iter().map(|to| PieceMove::quiet(from, to)).collect()
 }
 
 fn castle_moves(pos: &Position, color: Color) -> Vec<PieceMove> {
@@ -169,27 +149,30 @@ fn castle_moves(pos: &Position, color: Color) -> Vec<PieceMove> {
 
 pub fn pseudo_legal_moves(pos: &Position) -> Vec<PieceMove> {
     let color = pos.side_to_move;
+    let frozen = crate::spells::frozen_bb(pos);
+    let jump = crate::spells::jump_bb(pos);
+    let occ = pos.board.occupancy();
+    let own = pos.board.color_bb(color);
+    let slider_occ = occ.minus(jump);
     let mut out = Vec::new();
     out.extend(castle_moves(pos, color));
-    for i in 0..64 {
-        let sq = Square(i);
-        let piece: Piece = match pos.board.get(sq) {
-            Some(p) if p.color == color => p,
-            _ => continue,
-        };
-        if crate::spells::is_square_frozen(pos, sq) {
-            continue;
-        }
+    for sq in own.minus(frozen).iter() {
+        let piece = pos.board.get(sq).expect("color bit set");
         match piece.kind {
-            PieceKind::Pawn => out.extend(pawn_moves(pos, sq, color)),
-            PieceKind::Knight => out.extend(leaper_moves(pos, sq, &KNIGHT_OFFSETS, color)),
-            PieceKind::King => out.extend(leaper_moves(pos, sq, &KING_OFFSETS, color)),
-            PieceKind::Bishop => out.extend(slide_moves(pos, sq, &crate::rays::BISHOP_DIRS, color)),
-            PieceKind::Rook => out.extend(slide_moves(pos, sq, &crate::rays::ROOK_DIRS, color)),
-            PieceKind::Queen => {
-                out.extend(slide_moves(pos, sq, &crate::rays::ROOK_DIRS, color));
-                out.extend(slide_moves(pos, sq, &crate::rays::BISHOP_DIRS, color));
+            PieceKind::Pawn => out.extend(pawn_moves(pos, sq, color, jump)),
+            PieceKind::Knight => {
+                for dest in KNIGHT_ATTACKS[sq.0 as usize].minus(own).iter() {
+                    out.push(PieceMove::quiet(sq, dest));
+                }
             }
+            PieceKind::King => {
+                for dest in KING_ATTACKS[sq.0 as usize].minus(own).iter() {
+                    out.push(PieceMove::quiet(sq, dest));
+                }
+            }
+            PieceKind::Bishop => out.extend(slide_dests(sq, own, slider_occ, true, false)),
+            PieceKind::Rook => out.extend(slide_dests(sq, own, slider_occ, false, true)),
+            PieceKind::Queen => out.extend(slide_dests(sq, own, slider_occ, true, true)),
         }
     }
     out
