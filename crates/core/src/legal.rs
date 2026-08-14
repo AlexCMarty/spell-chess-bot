@@ -75,7 +75,7 @@ pub fn legal_moves(pos: &Position) -> Vec<PieceMove> {
     let jump = crate::spells::jump_bb(pos);
     let occ = pos.board.occupancy();
     let slider_occ = occ.minus(jump);
-    let checkers = checkers_of(pos, king_sq, enemy, frozen, slider_occ);
+    let checkers = crate::attacks::attackers_to(pos, king_sq, enemy, frozen, slider_occ);
     let checker_count = checkers.count();
     let pins = pins_of(pos, king_sq, mover, frozen, jump);
 
@@ -123,22 +123,6 @@ pub fn legal_moves(pos: &Position) -> Vec<PieceMove> {
             true
         })
         .collect()
-}
-
-fn checkers_of(pos: &Position, king: Square, by: Color, frozen: Bitboard, slider_occ: Bitboard) -> Bitboard {
-    let idx = king.0 as usize;
-    let mut acc = Bitboard::EMPTY;
-    let pawns = pos.board.color_bb(by).intersect(pos.board.kind_bb(PieceKind::Pawn)).minus(frozen);
-    acc = acc.union(pawns.intersect(crate::rays::PAWN_ATTACKS[by.opposite().index()][idx]));
-    let knights = pos.board.color_bb(by).intersect(pos.board.kind_bb(PieceKind::Knight)).minus(frozen);
-    acc = acc.union(knights.intersect(crate::rays::KNIGHT_ATTACKS[idx]));
-    let king_bb = pos.board.color_bb(by).intersect(pos.board.kind_bb(PieceKind::King)).minus(frozen);
-    acc = acc.union(king_bb.intersect(crate::rays::KING_ATTACKS[idx]));
-    let bq = pos.board.color_bb(by).intersect(pos.board.kind_bb(PieceKind::Bishop).union(pos.board.kind_bb(PieceKind::Queen))).minus(frozen);
-    acc = acc.union(bq.intersect(crate::rays::bishop_attacks(king, slider_occ)));
-    let rq = pos.board.color_bb(by).intersect(pos.board.kind_bb(PieceKind::Rook).union(pos.board.kind_bb(PieceKind::Queen))).minus(frozen);
-    acc = acc.union(rq.intersect(crate::rays::rook_attacks(king, slider_occ)));
-    acc
 }
 
 struct PinMap {

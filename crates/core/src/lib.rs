@@ -19,7 +19,7 @@ pub mod movegen;
 pub use movegen::{PieceMove, Promotion, pseudo_legal_moves};
 
 pub mod attacks;
-pub use attacks::{attacker_count, is_square_attacked};
+pub use attacks::{attacker_count, attackers_to, is_square_attacked};
 
 pub mod spells;
 
