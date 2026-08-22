@@ -23,6 +23,8 @@ const KILLER_PLY_SLACK: u32 = 32;
 /// sums a king) and far below `i32::MAX`, so negating it or adding a ply count
 /// never overflows.
 const MATE: i32 = 100_000;
+/// Any `|score|` at or above this is a mate score, not a material/positional one.
+const MATE_THRESHOLD: i32 = MATE - 1_000;
 
 /// The side to move has just lost -- king captured, or checkmated with no spell
 /// rescue -- at `ply` plies from the root. Losing later scores better (closer to
@@ -30,6 +32,36 @@ const MATE: i32 = 100_000;
 /// faster one.
 fn loss_at(ply: u32) -> i32 {
     -MATE + ply as i32
+}
+
+/// A mate score returned from a node at `ply` bakes in that node's absolute
+/// distance from wherever this particular search path started (see `loss_at`).
+/// The same position can be reached again later via a different path length --
+/// a genuine transposition -- so before caching the score in the TT, strip out
+/// this node's ply, leaving only "how many plies from *this position* to the
+/// mate," a property of the position itself. Non-mate scores pass through
+/// unchanged. See `tt_probe_score` for the inverse.
+fn tt_store_score(score: i32, ply: u32) -> i32 {
+    if score >= MATE_THRESHOLD {
+        score + ply as i32
+    } else if score <= -MATE_THRESHOLD {
+        score - ply as i32
+    } else {
+        score
+    }
+}
+
+/// Inverse of `tt_store_score`: rebases a cached mate distance onto the
+/// probing node's own distance from the root, so a mate score reused across a
+/// transposition reports the correct distance from wherever it's now being read.
+fn tt_probe_score(score: i32, ply: u32) -> i32 {
+    if score >= MATE_THRESHOLD {
+        score - ply as i32
+    } else if score <= -MATE_THRESHOLD {
+        score + ply as i32
+    } else {
+        score
+    }
 }
 
 struct SearchState<'a> {
@@ -231,18 +263,19 @@ fn alphabeta(
     let tt_entry = state.tt.get(key).copied();
     if let Some(entry) = tt_entry {
         if entry.depth >= depth {
+            let score = tt_probe_score(entry.score, ply);
             match entry.bound {
                 Bound::Exact => {
                     state.tt_hits += 1;
-                    return Some(entry.score);
+                    return Some(score);
                 }
-                Bound::Lower if entry.score >= beta => {
+                Bound::Lower if score >= beta => {
                     state.tt_hits += 1;
-                    return Some(entry.score);
+                    return Some(score);
                 }
-                Bound::Upper if entry.score <= alpha => {
+                Bound::Upper if score <= alpha => {
                     state.tt_hits += 1;
-                    return Some(entry.score);
+                    return Some(score);
                 }
                 _ => {}
             }
@@ -325,7 +358,7 @@ fn alphabeta(
         )? {
             state.no_spell_cutoffs += 1;
             let bound = if best <= original_alpha { Bound::Upper } else if best >= beta { Bound::Lower } else { Bound::Exact };
-            state.tt.insert(key, TtEntry { depth, score: best, bound, best_move: best_turn });
+            state.tt.insert(key, TtEntry { depth, score: tt_store_score(best, ply), bound, best_move: best_turn });
             return Some(best);
         }
     }
@@ -362,7 +395,7 @@ fn alphabeta(
         return Some(best);
     }
     let bound = if best <= original_alpha { Bound::Upper } else if best >= beta { Bound::Lower } else { Bound::Exact };
-    state.tt.insert(key, TtEntry { depth, score: best, bound, best_move: best_turn });
+    state.tt.insert(key, TtEntry { depth, score: tt_store_score(best, ply), bound, best_move: best_turn });
     Some(best)
 }
 
@@ -923,5 +956,33 @@ mod tests {
         // the root actually produce different scores. Before this feature, every
         // loss shared the exact same flat sentinel regardless of how deep it was.
         assert_ne!(loss_at(1), loss_at(3), "mates at different plies must not collapse to the same score");
+    }
+
+    #[test]
+    fn a_losing_mate_score_stored_at_one_ply_probes_correctly_at_another() {
+        // Position X is a fixed "2 more plies to a forced loss" property of X
+        // itself. Reached via one path X sits at ply 3 (terminal at absolute ply
+        // 5); reached via a different, longer path -- a genuine transposition --
+        // X sits at ply 6 (terminal at absolute ply 8). Storing the first path's
+        // raw score and probing it from the second path must not leak the first
+        // path's absolute terminal ply.
+        let score_via_first_path = loss_at(5); // computed with X at ply 3
+        let stored = tt_store_score(score_via_first_path, 3);
+        let probed = tt_probe_score(stored, 6);
+        assert_eq!(probed, loss_at(8), "a mate 2 plies from X must read as -MATE+8 when X is reached at ply 6");
+    }
+
+    #[test]
+    fn a_winning_mate_score_stored_at_one_ply_probes_correctly_at_another() {
+        let score_via_first_path = -loss_at(5); // the winning side's mirrored score
+        let stored = tt_store_score(score_via_first_path, 3);
+        let probed = tt_probe_score(stored, 6);
+        assert_eq!(probed, -loss_at(8));
+    }
+
+    #[test]
+    fn a_non_mate_score_is_unaffected_by_tt_ply_adjustment() {
+        assert_eq!(tt_store_score(120, 4), 120);
+        assert_eq!(tt_probe_score(120, 7), 120);
     }
 }
