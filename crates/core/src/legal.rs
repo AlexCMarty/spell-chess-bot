@@ -529,6 +529,37 @@ fn generate_turns_from(
     turns
 }
 
+/// The cheap half of quiescence's freeze handling: pair each already-legal
+/// baseline capture with a freeze that lands on the enemy's would-be
+/// recapturer, using only bitboard membership checks -- no `legal_moves` call.
+/// This alone is what implements "freeze the recapturer, then take"; the
+/// separate, much rarer case of freeze *creating* a capture that wasn't legal
+/// before needs the expensive `legal_moves` scan in `generate_quiescence_from`.
+fn freeze_recapture_turns(pos: &Position, us: Color, baseline: &[PieceMove], frozen: Bitboard) -> Vec<Turn> {
+    let mut turns = Vec::new();
+    if !pos.spells(us).freeze.castable() {
+        return turns;
+    }
+    let their_bb = pos.board.color_bb(us.opposite());
+    let our_bb = pos.board.color_bb(us);
+    let captures: Vec<PieceMove> = baseline.iter().copied().filter(|mv| is_capture(pos, mv)).collect();
+    for sq in crate::spells::relevant_freeze_targets(pos, us, baseline) {
+        let zone = crate::spells::FREEZE_ZONE[sq.0 as usize];
+        let hits_us = zone.minus(frozen).intersect(our_bb);
+        let cast = SpellCast { kind: SpellKind::Freeze, square: sq };
+        for mv in &captures {
+            if !move_survives_own_freeze(mv, hits_us) {
+                continue;
+            }
+            if zone.intersect(occupancy_after_move(pos, mv)).intersect(their_bb).is_empty() {
+                continue;
+            }
+            turns.push(Turn { spell: Some(cast), mv: *mv });
+        }
+    }
+    turns
+}
+
 fn generate_quiescence_from(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn> {
     let mut turns: Vec<Turn> = baseline
         .iter()
@@ -543,6 +574,7 @@ fn generate_quiescence_from(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn>
     let jump = crate::spells::jump_bb(pos);
     let slider_occ = pos.board.occupancy().minus(jump);
     let Some(king_sq) = pos.board.king_square(us) else {
+        turns.extend(freeze_recapture_turns(pos, us, baseline, frozen));
         return turns;
     };
     let checkers = crate::attacks::attackers_to(pos, king_sq, enemy, frozen, slider_occ);
@@ -562,28 +594,14 @@ fn generate_quiescence_from(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn>
         }
     }
 
+    turns.extend(freeze_recapture_turns(pos, us, baseline, frozen));
+
     if pos.spells(us).freeze.castable() {
         let their_bb = pos.board.color_bb(enemy);
-        let our_bb = pos.board.color_bb(us);
-        let captures: Vec<PieceMove> = baseline.iter().copied().filter(|mv| is_capture(pos, mv)).collect();
         for sq in crate::spells::relevant_freeze_targets(pos, us, baseline) {
             let zone = crate::spells::FREEZE_ZONE[sq.0 as usize];
-            let newly = zone.minus(frozen);
-            let hits_them = newly.intersect(their_bb);
-            let hits_us = newly.intersect(our_bb);
+            let hits_them = zone.minus(frozen).intersect(their_bb);
             let cast = SpellCast { kind: SpellKind::Freeze, square: sq };
-            // Freeze a recapturer (or other enemy in the zone) and take a piece
-            // that was already legal to capture. Qsearch used to emit only *new*
-            // freeze-enabled captures, which dropped this signature tactic.
-            for mv in &captures {
-                if !move_survives_own_freeze(mv, hits_us) {
-                    continue;
-                }
-                if zone.intersect(occupancy_after_move(pos, mv)).intersect(their_bb).is_empty() {
-                    continue;
-                }
-                turns.push(Turn { spell: Some(cast), mv: *mv });
-            }
             if freeze_enemy_affects_this_ply(pos, hits_them, us, king_sq, checkers, &pins, frozen, slider_occ) {
                 for mv in legal_moves(&position_with_field(pos, cast)) {
                     if is_capture(pos, &mv) && !in_baseline(baseline, mv) {
@@ -599,8 +617,29 @@ fn generate_quiescence_from(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn>
 /// Captures for quiescence: no-spell captures, jump casts that enable a new
 /// capture, and freeze pairings that either enable a new capture or immobilise
 /// an enemy piece that still occupies the freeze zone after a baseline capture.
+/// Expensive (a `legal_moves` scan per relevant jump/freeze target) -- use for
+/// the entry into quiescence, not for every recursive node inside it. See
+/// `generate_quiescence_recapture_turns` for the cheap recursive alternative.
 pub fn generate_quiescence_turns_from(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn> {
     generate_quiescence_from(pos, baseline)
+}
+
+/// No-spell captures plus the cheap "freeze the recapturer" tactic only --
+/// omits jump-enabled and freeze-enabled *new* captures, which need a
+/// `legal_moves` scan per relevant target and are what made quiescence's
+/// recursive nodes catastrophically expensive when they used the full
+/// generator at every ply. Meant for recursive quiescence calls, where the
+/// entry node already covered the expensive cases once.
+pub fn generate_quiescence_recapture_turns(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn> {
+    let mut turns: Vec<Turn> = baseline
+        .iter()
+        .copied()
+        .filter(|mv| is_capture(pos, mv))
+        .map(|mv| Turn { spell: None, mv })
+        .collect();
+    let frozen = crate::spells::frozen_bb(pos);
+    turns.extend(freeze_recapture_turns(pos, pos.side_to_move, baseline, frozen));
+    turns
 }
 
 pub fn generate_quiescence_turns(pos: &Position) -> Vec<Turn> {
@@ -937,6 +976,52 @@ mod tests {
             t.mv.to == d5 && t.spell.is_some_and(|s| s.kind == SpellKind::Freeze)
         });
         assert!(found, "qsearch must offer freeze + Rxd5, not only the naked recapture");
+    }
+
+    #[test]
+    fn cheap_recapture_turns_still_offer_freeze_the_recapturer() {
+        // Same fixture as quiescence_turns_include_freeze_that_stops_a_recapture:
+        // the cheap generator must keep this tactic visible, since it's the whole
+        // reason quiescence's recursive calls need more than bare captures.
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d5").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Knight }));
+        pos.board.set(Square::from_str("c6").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.white_spells.jump.count = 0;
+        let d5 = Square::from_str("d5").unwrap();
+        let baseline = legal_moves(&pos);
+        let found = generate_quiescence_recapture_turns(&pos, &baseline).into_iter().any(|t| {
+            t.mv.to == d5 && t.spell.is_some_and(|s| s.kind == SpellKind::Freeze)
+        });
+        assert!(found, "the cheap recapture generator must still offer freeze + Rxd5");
+    }
+
+    #[test]
+    fn cheap_recapture_turns_omit_a_jump_enabled_new_capture() {
+        // White's queen is blocked from d5 by Black's pawn on d3; jump@d3 makes
+        // the blocker transparent, letting Qxd5 through -- a capture that was not
+        // already legal. The expensive full generator finds it (it must, to keep
+        // this tactic visible at the quiescence entry point); the cheap recapture
+        // generator must not, since that's exactly the per-target legal_moves()
+        // scan it exists to skip on every recursive quiescence node.
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Queen }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d3").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("d5").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
+        pos.white_spells.freeze.count = 0;
+        let d5 = Square::from_str("d5").unwrap();
+        let baseline = legal_moves(&pos);
+        let is_jump_qxd5 = |t: &Turn| t.mv.to == d5 && t.spell.is_some_and(|s| s.kind == SpellKind::Jump);
+
+        let full = generate_quiescence_turns_from(&pos, &baseline);
+        assert!(full.iter().any(is_jump_qxd5), "the full generator must find jump@d3 + Qxd5");
+
+        let cheap = generate_quiescence_recapture_turns(&pos, &baseline);
+        assert!(!cheap.iter().any(is_jump_qxd5), "the cheap generator must not pay for the jump scan");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use std::time::{Duration, Instant};
-use spellchess_core::{apply_turn, generate_quiescence_turns_from, generate_search_spell_turns, generate_search_turns, legal_moves, Color, PieceKind, Position, Turn};
+use spellchess_core::{apply_turn, generate_quiescence_recapture_turns, generate_quiescence_turns_from, generate_search_spell_turns, generate_search_turns, legal_moves, Color, PieceKind, Position, Turn};
 use crate::eval::{evaluate, piece_value};
 use crate::tables::{HistoryTable, KillerTable};
 use crate::tt::{Bound, TranspositionTable, TtEntry};
@@ -474,7 +474,14 @@ fn quiescence(
             }
         }
         let next = apply_turn(pos, &turn);
-        let next_turns = generate_quiescence_turns_from(&next, &legal_moves(&next));
+        // Cheap generator: the expensive per-target legal_moves() scan (jump and
+        // freeze *new*-capture discovery) only runs once, at the entry into
+        // quiescence (see the two generate_quiescence_turns_from call sites in
+        // alphabeta). Recursive nodes like this one only need the "freeze the
+        // recapturer" tactic, which generate_quiescence_recapture_turns covers
+        // without it -- see its doc comment for why paying the full cost here
+        // used to blow quiescence's node count up catastrophically.
+        let next_turns = generate_quiescence_recapture_turns(&next, &legal_moves(&next));
         let score = match quiescence(&next, -beta, -alpha, qdepth - 1, ply + 1, state, next_turns) {
             Some(s) => -s,
             None => return None,
