@@ -355,6 +355,42 @@ fn jump_may_change_this_ply(
             return true;
         }
     }
+    // Jumping a blocker can open an enemy slider onto a king-flight or
+    // castle-transit square without touching the king's current ray — e.g.
+    // jump@f4 with Rf8 makes Kf1 / O-O walk into check.
+    for dest in crate::rays::KING_ATTACKS[king_sq.0 as usize].iter() {
+        for slider in enemy_sliders.iter() {
+            if crate::rays::between(slider, dest).contains(sq) {
+                return true;
+            }
+        }
+    }
+    let rights = pos.castle_rights;
+    let (ks, qs) = match us {
+        Color::White => (rights.white_kingside, rights.white_queenside),
+        Color::Black => (rights.black_kingside, rights.black_queenside),
+    };
+    let rank = king_sq.rank();
+    if ks {
+        for file in [5u8, 6] {
+            let dest = Square::new(file, rank);
+            for slider in enemy_sliders.iter() {
+                if crate::rays::between(slider, dest).contains(sq) {
+                    return true;
+                }
+            }
+        }
+    }
+    if qs {
+        for file in [2u8, 3] {
+            let dest = Square::new(file, rank);
+            for slider in enemy_sliders.iter() {
+                if crate::rays::between(slider, dest).contains(sq) {
+                    return true;
+                }
+            }
+        }
+    }
     false
 }
 
@@ -526,18 +562,33 @@ fn generate_quiescence_from(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn>
         }
     }
 
-    if pos.spells(us).freeze.castable() && (!checkers.is_empty() || !pins.pinned.is_empty()) {
+    if pos.spells(us).freeze.castable() {
         let their_bb = pos.board.color_bb(enemy);
-        for sq in crate::spells::freeze_targets(pos, us) {
-            let newly = crate::spells::FREEZE_ZONE[sq.0 as usize].minus(frozen);
+        let our_bb = pos.board.color_bb(us);
+        let captures: Vec<PieceMove> = baseline.iter().copied().filter(|mv| is_capture(pos, mv)).collect();
+        for sq in crate::spells::relevant_freeze_targets(pos, us, baseline) {
+            let zone = crate::spells::FREEZE_ZONE[sq.0 as usize];
+            let newly = zone.minus(frozen);
             let hits_them = newly.intersect(their_bb);
-            if !freeze_enemy_affects_this_ply(pos, hits_them, us, king_sq, checkers, &pins, frozen, slider_occ) {
-                continue;
-            }
+            let hits_us = newly.intersect(our_bb);
             let cast = SpellCast { kind: SpellKind::Freeze, square: sq };
-            for mv in legal_moves(&position_with_field(pos, cast)) {
-                if is_capture(pos, &mv) && !in_baseline(baseline, mv) {
-                    turns.push(Turn { spell: Some(cast), mv });
+            // Freeze a recapturer (or other enemy in the zone) and take a piece
+            // that was already legal to capture. Qsearch used to emit only *new*
+            // freeze-enabled captures, which dropped this signature tactic.
+            for mv in &captures {
+                if !move_survives_own_freeze(mv, hits_us) {
+                    continue;
+                }
+                if zone.intersect(occupancy_after_move(pos, mv)).intersect(their_bb).is_empty() {
+                    continue;
+                }
+                turns.push(Turn { spell: Some(cast), mv: *mv });
+            }
+            if freeze_enemy_affects_this_ply(pos, hits_them, us, king_sq, checkers, &pins, frozen, slider_occ) {
+                for mv in legal_moves(&position_with_field(pos, cast)) {
+                    if is_capture(pos, &mv) && !in_baseline(baseline, mv) {
+                        turns.push(Turn { spell: Some(cast), mv });
+                    }
                 }
             }
         }
@@ -545,9 +596,9 @@ fn generate_quiescence_from(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn>
     turns
 }
 
-/// Captures for quiescence: no-spell captures plus spell casts that enable a
-/// capture that was not already legal. Freeze/jump pairings that only retag an
-/// existing capture are omitted.
+/// Captures for quiescence: no-spell captures, jump casts that enable a new
+/// capture, and freeze pairings that either enable a new capture or immobilise
+/// an enemy piece that still occupies the freeze zone after a baseline capture.
 pub fn generate_quiescence_turns_from(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn> {
     generate_quiescence_from(pos, baseline)
 }
@@ -870,6 +921,42 @@ mod tests {
         combined.sort_by_key(key);
         full.sort_by_key(key);
         assert_eq!(combined, full);
+    }
+
+    #[test]
+    fn quiescence_turns_include_freeze_that_stops_a_recapture() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d5").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Knight }));
+        pos.board.set(Square::from_str("c6").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.white_spells.jump.count = 0;
+        let d5 = Square::from_str("d5").unwrap();
+        let found = generate_quiescence_turns(&pos).into_iter().any(|t| {
+            t.mv.to == d5 && t.spell.is_some_and(|s| s.kind == SpellKind::Freeze)
+        });
+        assert!(found, "qsearch must offer freeze + Rxd5, not only the naked recapture");
+    }
+
+    #[test]
+    fn jump_does_not_pair_king_walks_the_jump_opens_to_check() {
+        // Pf4 blocks Black's rook on f8 from f1. Jumping f4 makes the f-file
+        // transparent, so Kf1 and O-O walk into check and must not be emitted.
+        let mut pos = Position { board: Board::empty(), castle_rights: CastleRights::all(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("f4").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("h1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("f8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
+        let e1 = Square::from_str("e1").unwrap();
+        let f4 = Square::from_str("f4").unwrap();
+        let f1 = Square::from_str("f1").unwrap();
+        let illegal: Vec<_> = generate_turns(&pos).into_iter().filter(|t| {
+            t.spell == Some(SpellCast { kind: SpellKind::Jump, square: f4 })
+                && (t.mv.is_castle || (t.mv.from == e1 && t.mv.to == f1))
+        }).collect();
+        assert!(illegal.is_empty(), "jump@f4 must not pair king walks into the opened file, got {illegal:?}");
     }
 
     #[test]

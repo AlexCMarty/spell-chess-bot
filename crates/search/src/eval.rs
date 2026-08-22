@@ -18,7 +18,7 @@ pub fn piece_value(kind: PieceKind) -> i32 {
         PieceKind::Bishop => 330,
         PieceKind::Rook => 500,
         PieceKind::Queen => 900,
-        PieceKind::King => 0,
+        PieceKind::King => 20_000,
     }
 }
 
@@ -52,8 +52,8 @@ fn jump_threat_bonus(pos: &Position, color: Color) -> i32 {
         pos.board.kind_bb(PieceKind::Bishop)
             .union(pos.board.kind_bb(PieceKind::Rook))
             .union(pos.board.kind_bb(PieceKind::Queen)),
-    );
-    let occ = pos.board.occupancy();
+    ).minus(spellchess_core::spells::frozen_bb(pos));
+    let occ = pos.board.occupancy().minus(spellchess_core::spells::jump_bb(pos));
     for sq in sliders.iter() {
         let piece = pos.board.get(sq).unwrap();
         let on_ray = match piece.kind {
@@ -159,5 +159,24 @@ mod tests {
         pos.black_spells.jump.count = 0;
         let without_threat = evaluate(&pos);
         assert!(with_threat > without_threat);
+    }
+
+    #[test]
+    fn a_frozen_slider_is_not_a_jump_threat() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d2").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Bishop }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("b4").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Bishop }));
+        pos.side_to_move = Color::Black;
+        let live = evaluate(&pos);
+        pos.fields.push(spellchess_core::SpellField {
+            square: Square::from_str("b4").unwrap(),
+            owner: Color::White,
+            kind: spellchess_core::SpellKind::Freeze,
+            expires_after_ply: pos.ply + 1,
+        });
+        let frozen = evaluate(&pos);
+        assert!(frozen < live, "a frozen bishop cannot jump-capture the king, live={live} frozen={frozen}");
     }
 }

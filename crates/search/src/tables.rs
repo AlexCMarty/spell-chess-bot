@@ -53,7 +53,8 @@ impl HistoryTable {
     }
 
     pub fn record(&mut self, from: Square, to: Square, depth: u32) {
-        self.scores[from.0 as usize][to.0 as usize] += depth * depth;
+        self.scores[from.0 as usize][to.0 as usize] =
+            self.scores[from.0 as usize][to.0 as usize].saturating_add(depth.saturating_mul(depth));
     }
 }
 

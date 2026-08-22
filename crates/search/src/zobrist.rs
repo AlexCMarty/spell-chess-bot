@@ -187,7 +187,7 @@ pub fn hash_position(pos: &Position) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spellchess_core::Position;
+    use spellchess_core::{Color, Position, SpellKind};
 
     #[test]
     fn identical_positions_hash_identically() {
@@ -208,5 +208,29 @@ mod tests {
         shifted.ply = 12;
         shifted.halfmove_clock = 7;
         assert_eq!(hash_position(&Position::starting()), hash_position(&shifted));
+    }
+
+    #[test]
+    fn hash_changes_when_spell_counts_or_locks_change() {
+        let start = Position::starting();
+        let mut fewer = start;
+        fewer.white_spells.freeze.count = 4;
+        assert_ne!(hash_position(&start), hash_position(&fewer));
+        let mut locked = start;
+        locked.white_spells.jump.lock = 3;
+        assert_ne!(hash_position(&start), hash_position(&locked));
+    }
+
+    #[test]
+    fn hash_changes_when_a_live_field_is_added() {
+        let start = Position::starting();
+        let mut with_field = start;
+        with_field.fields.push(spellchess_core::SpellField {
+            square: spellchess_core::Square::from_str("d5").unwrap(),
+            owner: Color::White,
+            kind: SpellKind::Freeze,
+            expires_after_ply: start.ply + 1,
+        });
+        assert_ne!(hash_position(&start), hash_position(&with_field));
     }
 }

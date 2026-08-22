@@ -30,7 +30,11 @@ fn turn_priority(
     let mut score = 0;
     let is_capture = pos.board.get(t.mv.to).is_some() || t.mv.is_en_passant;
     if is_capture {
-        let captured_value = pos.board.get(t.mv.to).map(|p| crate::eval::piece_value(p.kind)).unwrap_or(0);
+        let captured_value = if t.mv.is_en_passant {
+            crate::eval::piece_value(spellchess_core::PieceKind::Pawn)
+        } else {
+            pos.board.get(t.mv.to).map(|p| crate::eval::piece_value(p.kind)).unwrap_or(0)
+        };
         score += CAPTURE_BASE + captured_value;
     } else if killers.contains(&Some(*t)) {
         score += KILLER_SCORE;
@@ -122,6 +126,28 @@ mod tests {
         let is_capture = |t: &Turn| pos.board.get(t.mv.to).is_some();
         let capture_count = ordered.iter().filter(|t| is_capture(t)).count();
         assert_eq!(ordered[capture_count], killer, "the killer must sort immediately after every capture");
+    }
+
+    #[test]
+    fn king_captures_sort_ahead_of_other_captures() {
+        // King capture wins the game; MVV must not rank it below a queen grab
+        // just because piece_value(King) was 0.
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d8").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("h4").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Queen }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("h5").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Queen }));
+
+        let turns = generate_turns(&pos);
+        let ordered = order_turns(&pos, turns, None, [None, None], None);
+        let king_cap = ordered.iter().position(|t| {
+            pos.board.get(t.mv.to).is_some_and(|p| p.kind == PieceKind::King)
+        }).expect("king capture must be legal");
+        let queen_cap = ordered.iter().position(|t| {
+            pos.board.get(t.mv.to).is_some_and(|p| p.kind == PieceKind::Queen)
+        }).expect("queen capture must be legal");
+        assert!(king_cap < queen_cap, "king capture at {king_cap} must outrank queen capture at {queen_cap}");
     }
 
     #[test]

@@ -72,15 +72,6 @@ fn make_null_move(pos: &Position) -> Position {
     next
 }
 
-fn no_spell_captures(pos: &Position, baseline: &[spellchess_core::PieceMove]) -> Vec<Turn> {
-    baseline
-        .iter()
-        .copied()
-        .filter(|mv| pos.board.get(mv.to).is_some() || mv.is_en_passant)
-        .map(|mv| Turn { spell: None, mv })
-        .collect()
-}
-
 fn spell_capture_turns(pos: &Position, baseline: &[spellchess_core::PieceMove]) -> Vec<Turn> {
     generate_quiescence_turns_from(pos, baseline)
         .into_iter()
@@ -110,7 +101,7 @@ fn search_children(
         let idx = *move_index;
         *move_index += 1;
         let capture = is_capture(pos, &turn);
-        if !is_pv && !in_check && !capture {
+        if !is_pv && !in_check && !capture && turn.spell.is_none() {
             let lmp = 3 + (depth as usize) * (depth as usize);
             if idx >= lmp {
                 continue;
@@ -118,7 +109,7 @@ fn search_children(
         }
         if let Some(eval) = static_eval {
             let margin = 200 + 150 * depth as i32;
-            if idx > 0 && !capture && eval + margin <= *alpha {
+            if idx > 0 && !capture && turn.spell.is_none() && eval.saturating_add(margin) <= *alpha {
                 continue;
             }
         }
@@ -216,6 +207,7 @@ fn alphabeta(
     };
 
     let is_pv = is_pv_window(alpha, beta);
+    let in_check = spellchess_core::is_square_attacked(pos, king_sq, pos.side_to_move.opposite());
     let key = hash_position(pos);
     let tt_entry = state.tt.get(key).copied();
     if let Some(entry) = tt_entry {
@@ -243,42 +235,53 @@ fn alphabeta(
         if baseline.is_empty() {
             let turns = generate_search_turns(pos);
             if turns.is_empty() {
-                return Some(if spellchess_core::is_square_attacked(pos, king_sq, pos.side_to_move.opposite()) {
+                return Some(if in_check {
                     i32::MIN + 1
                 } else {
                     0
                 });
             }
         }
-        return quiescence(pos, alpha, beta, MAX_QUIESCENCE_DEPTH, state, generate_quiescence_turns_from(pos, &baseline));
+        let qturns = generate_quiescence_turns_from(pos, &baseline);
+        return quiescence(pos, alpha, beta, MAX_QUIESCENCE_DEPTH, state, qturns);
     }
 
-    let in_check = spellchess_core::is_square_attacked(pos, king_sq, pos.side_to_move.opposite());
     let static_eval = evaluate(pos);
-    if !in_check && !is_pv && depth <= 6 && static_eval >= beta + 120 * depth as i32 {
+    if !in_check && !is_pv && depth <= 6 && static_eval.saturating_sub(120 * depth as i32) >= beta {
         return Some(static_eval);
     }
     if !in_check && !is_pv && depth <= 2 {
         let margin = 250 + 150 * depth as i32;
-        if static_eval + margin < alpha {
+        if static_eval.saturating_add(margin) < alpha {
             let baseline = legal_moves(pos);
-            return quiescence(pos, alpha, beta, MAX_QUIESCENCE_DEPTH, state, generate_quiescence_turns_from(pos, &baseline));
+            if let Some(q) = quiescence(pos, alpha, beta, MAX_QUIESCENCE_DEPTH, state, generate_quiescence_turns_from(pos, &baseline)) {
+                if q < alpha {
+                    return Some(q);
+                }
+            } else {
+                return None;
+            }
         }
     }
     if !in_check && !is_pv && depth >= 3 && has_non_pawn_material(pos, pos.side_to_move) {
-        let r = 2 + depth / 4;
-        let next = make_null_move(pos);
-        let null_depth = depth.saturating_sub(1 + r);
-        if let Some(s) = alphabeta(&next, null_depth, -beta, -beta + 1, ply + 1, state) {
-            if -s >= beta {
-                state.nmp_cutoffs += 1;
-                return Some(-s);
+        let frozen_us = !spellchess_core::spells::frozen_bb(pos)
+            .intersect(pos.board.color_bb(pos.side_to_move))
+            .is_empty();
+        if !frozen_us {
+            let r = 2 + depth / 4;
+            let next = make_null_move(pos);
+            let null_depth = depth.saturating_sub(1 + r);
+            if let Some(s) = alphabeta(&next, null_depth, -beta, -beta + 1, ply + 1, state) {
+                if -s >= beta {
+                    state.nmp_cutoffs += 1;
+                    return Some(-s);
+                }
+            } else {
+                return None;
             }
-        } else {
-            return None;
         }
     }
-    let futility_eval = if depth <= 2 && !in_check { Some(static_eval) } else { None };
+    let futility_eval = if depth <= 2 && !in_check && !is_pv { Some(static_eval) } else { None };
 
     let baseline = legal_moves(pos);
     let no_spell = no_spell_turns(&baseline);
@@ -292,7 +295,9 @@ fn alphabeta(
     };
 
     let tt_move = tt_entry.and_then(|e| e.best_move);
-    let mut best = i32::MIN + 1;
+    // Below every reachable score, including the "king already gone" loss of
+    // i32::MIN + 1, so the first searched move always records a best_turn.
+    let mut best = i32::MIN;
     let mut best_turn: Option<Turn> = None;
     let original_alpha = alpha;
     let mut move_index = 0usize;
@@ -313,10 +318,12 @@ fn alphabeta(
 
     // Full freeze/jump pairing is ~1500 turns in the dense opening. Searching
     // that list on every PV node at remaining-depth 10+ is what made depth 15
-    // blow up. Keep the full pairing only for check evasions and shallow PV
-    // (where a quiet freeze can still change the tactic before the horizon);
-    // everywhere else only spell-enabled captures.
-    let full_spells = in_check || (is_pv && depth <= 3 && ply > 0);
+    // blow up. The root must still see every relevant pairing — otherwise a
+    // freeze that only retags an already-legal capture (immobilise the
+    // defender, then take) can never be played. Interior nodes keep the full
+    // list only for check evasions and shallow PV; everywhere else only
+    // spell-enabled captures.
+    let full_spells = ply == 0 || in_check || (is_pv && depth <= 3) || no_spell_empty;
     let spells = if full_spells {
         state.spell_gens += 1;
         generate_search_spell_turns(pos, &baseline)
@@ -335,16 +342,19 @@ fn alphabeta(
         )?;
     }
 
+    // A truncated spell list can only miss a better move, so the score is not
+    // an Exact/Upper bound. Fail-highs remain valid Lower bounds.
+    if !(full_spells || best >= beta) {
+        return Some(best);
+    }
     let bound = if best <= original_alpha { Bound::Upper } else if best >= beta { Bound::Lower } else { Bound::Exact };
     state.tt.insert(key, TtEntry { depth, score: best, bound, best_move: best_turn });
     Some(best)
 }
 
-/// Filters `turns` to captures and collapses duplicates that differ only by an
-/// irrelevant spell cast (same from/to/promotion) down to one representative --
-/// preferring the no-spell variant. `generate_turns` pairs every move with every
-/// castable spell target, so without this a single real capture can appear
-/// dozens of times, multiplying quiescence's effective branching factor.
+/// Search `turns` as captures. Spell and no-spell pairings of the same
+/// from/to/promotion are kept both — collapsing them used to drop freeze-the-
+/// defender captures in favour of the naked recapture.
 fn dedup_captures(pos: &Position, turns: Vec<Turn>) -> Vec<Turn> {
     let mut out: Vec<Turn> = Vec::new();
     for turn in turns {
@@ -356,8 +366,8 @@ fn dedup_captures(pos: &Position, turns: Vec<Turn>) -> Vec<Turn> {
             t.mv.from == turn.mv.from && t.mv.to == turn.mv.to && t.mv.promotion == turn.mv.promotion
         }) {
             Some(existing) => {
-                if existing.spell.is_some() && turn.spell.is_none() {
-                    *existing = turn;
+                if existing.spell != turn.spell {
+                    out.push(turn);
                 }
             }
             None => { out.push(turn); }
@@ -381,10 +391,14 @@ fn quiescence(
     if pos.board.king_square(pos.side_to_move).is_none() {
         return Some(i32::MIN + 1); // loss for the side to move: its king is already gone
     }
+    let king_sq = pos.board.king_square(pos.side_to_move).unwrap();
+    let in_check = spellchess_core::is_square_attacked(pos, king_sq, pos.side_to_move.opposite());
 
     let stand_pat = evaluate(pos);
-    if stand_pat >= beta {
-        return Some(beta);
+    if !in_check {
+        if stand_pat >= beta {
+            return Some(beta);
+        }
     }
     if stand_pat > alpha {
         alpha = stand_pat;
@@ -393,7 +407,8 @@ fn quiescence(
         return Some(alpha);
     }
 
-    for turn in dedup_captures(pos, turns) {
+    let search_turns = dedup_captures(pos, turns);
+    for turn in search_turns {
         let captured_kind = if turn.mv.is_en_passant {
             Some(PieceKind::Pawn)
         } else {
@@ -401,14 +416,17 @@ fn quiescence(
         };
         if let Some(kind) = captured_kind {
             if kind != PieceKind::King {
-                let gain = piece_value(kind);
-                if stand_pat + gain + 200 < alpha {
+                let mut gain = piece_value(kind);
+                if let Some(promo) = turn.mv.promotion {
+                    gain += piece_value(promo.piece_kind()) - piece_value(PieceKind::Pawn);
+                }
+                if stand_pat.saturating_add(gain).saturating_add(200) < alpha {
                     continue;
                 }
             }
         }
         let next = apply_turn(pos, &turn);
-        let next_turns = no_spell_captures(&next, &legal_moves(&next));
+        let next_turns = generate_quiescence_turns_from(&next, &legal_moves(&next));
         let score = match quiescence(&next, -beta, -alpha, qdepth - 1, state, next_turns) {
             Some(s) => -s,
             None => return None,
@@ -742,15 +760,7 @@ mod tests {
     fn quiescence_sees_past_a_hanging_capture_at_the_horizon() {
         let pos = quiescence_test_position();
         let score_with_quiescence = negamax(&pos, 1);
-        // Without quiescence (evaluate() called directly at depth 0), the search
-        // blunders: it sees Qxd5 as winning a free knight (score 800, since the naive
-        // leaf eval never looks past the capture to the c6 pawn's recapture) and plays
-        // it over every safe alternative. With quiescence, Qxd5's true value collapses
-        // once the recapture is searched out, so the engine instead keeps the queen
-        // safe and preserves its pre-existing material edge (Queen vs Knight+Pawn),
-        // landing at 480 — well under the naive blunder's 800. Threshold picked with a
-        // wide margin between those two verified values, not tied to the exact 480.
-        assert!(score_with_quiescence < 700);
+        assert!(score_with_quiescence < 700, "got {score_with_quiescence}");
     }
 
     #[test]
@@ -815,6 +825,29 @@ mod tests {
     }
 
     #[test]
+    fn search_plays_freeze_to_win_a_defended_piece() {
+        // Rook on d1 can take the knight on d5, but the c6 pawn recaptures.
+        // Freeze on the pawn's neighbourhood immobilises it, so Rxd5 wins a piece.
+        // Jump is disabled so the only tactic is freeze-then-capture, not a
+        // jump-through king hunt. A queen on d1 would also freeze-mate via Qh5.
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d5").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Knight }));
+        pos.board.set(Square::from_str("c6").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.white_spells.jump.count = 0;
+        pos.black_spells = spellchess_core::SpellState {
+            freeze: spellchess_core::SpellCounter { count: 0, lock: 0 },
+            jump: spellchess_core::SpellCounter { count: 0, lock: 0 },
+        };
+        let (turn, score) = search(&pos, Budget::Depth(2)).expect("a move must be found");
+        assert_eq!(turn.mv.to, Square::from_str("d5").unwrap(), "must take the hanging knight; played {turn:?} score={score}");
+        assert!(turn.spell.is_some(), "must freeze the recapturing pawn, got {turn:?}");
+        assert!(score > 300, "winning the knight should beat keeping R vs N+P, got {score}");
+    }
+
+    #[test]
     fn alpha_beta_agrees_with_task_18_mate_in_one() {
         let mut pos = Position { board: Board::empty(), ..Position::starting() };
         pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
@@ -825,5 +858,24 @@ mod tests {
         pos.board.set(Square::from_str("h7").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
         let (turn, _) = best_turn(&pos, 1).expect("a move must be found");
         assert_eq!(turn.mv.to, Square::from_str("a8").unwrap());
+    }
+
+    #[test]
+    fn search_reports_a_loss_when_every_move_is_mate() {
+        // White is mated next ply no matter what (Rb1-h1). Search used to leave
+        // best_turn unset because a real loss scores the same as the sentinel,
+        // then report a shallow non-mate from the previous ID iteration.
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("h8").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("a2").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("f7").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("b1").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
+        pos.white_spells = spellchess_core::SpellState {
+            freeze: spellchess_core::SpellCounter { count: 0, lock: 0 },
+            jump: spellchess_core::SpellCounter { count: 0, lock: 0 },
+        };
+        pos.black_spells = pos.white_spells;
+        let (_turn, score) = search(&pos, Budget::Depth(2)).expect("a legal pawn push exists");
+        assert!(score <= i32::MIN + 100, "forced mate must score as a loss, got {score}");
     }
 }

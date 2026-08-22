@@ -44,7 +44,18 @@ impl TranspositionTable {
     pub fn insert(&mut self, key: u64, entry: TtEntry) {
         let i = Self::index(key);
         if let Some((old_key, old)) = self.table[i] {
-            if old_key != key && old.depth > entry.depth {
+            if old_key == key {
+                if old.depth > entry.depth {
+                    return;
+                }
+                let mut entry = entry;
+                if entry.best_move.is_none() {
+                    entry.best_move = old.best_move;
+                }
+                self.table[i] = Some((key, entry));
+                return;
+            }
+            if old.depth > entry.depth {
                 return;
             }
         }
@@ -66,5 +77,24 @@ mod tests {
         assert_eq!(entry.depth, 3);
         assert_eq!(entry.score, 17);
         assert_eq!(entry.best_move, Some(stub_turn));
+    }
+
+    #[test]
+    fn a_shallower_same_key_insert_does_not_replace_a_deeper_entry() {
+        let mut tt = TranspositionTable::new();
+        tt.insert(42, TtEntry { depth: 10, score: 99, bound: Bound::Exact, best_move: None });
+        tt.insert(42, TtEntry { depth: 1, score: 0, bound: Bound::Upper, best_move: None });
+        let entry = tt.get(42).unwrap();
+        assert_eq!(entry.depth, 10);
+        assert_eq!(entry.score, 99);
+        assert_eq!(entry.bound, Bound::Exact);
+    }
+
+    #[test]
+    fn get_rejects_a_different_key_on_the_same_slot() {
+        let mut tt = TranspositionTable::new();
+        tt.insert(42, TtEntry { depth: 3, score: 17, bound: Bound::Exact, best_move: None });
+        let colliding = 42 + TT_SIZE as u64;
+        assert!(tt.get(colliding).is_none());
     }
 }
