@@ -1,10 +1,8 @@
 use spellchess_core::{Square, Turn};
 
-/// Two killer-move slots per remaining-depth bucket -- `depth` is the same
-/// remaining-depth parameter already threaded through `alphabeta`, not
-/// ply-from-root. Collisions across branches that happen to share a remaining-depth
-/// value are the standard, accepted approximation every engine that implements this
-/// heuristic makes; it doesn't need to be exact to be useful.
+/// Two killer-move slots per ply-from-root bucket. Collisions across branches that
+/// happen to share a ply value are the standard, accepted approximation every engine
+/// that implements this heuristic makes; it doesn't need to be exact to be useful.
 pub struct KillerTable {
     slots: Vec<[Option<Turn>; 2]>,
 }
@@ -18,7 +16,7 @@ impl KillerTable {
         self.slots.get(depth as usize).copied().unwrap_or([None, None])
     }
 
-    /// Records a quiet move that caused a beta cutoff at `depth`. Killers are a
+    /// Records a quiet move that caused a beta cutoff at `ply`. Killers are a
     /// move-ordering hint, not game state -- a depth beyond the table's capacity (or
     /// a move already present) is silently ignored rather than treated as an error;
     /// the worst case is a slightly worse ordering, never incorrect search results.

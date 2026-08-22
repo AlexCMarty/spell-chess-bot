@@ -86,13 +86,17 @@ fn on_diag(a: Square, b: Square) -> bool {
 /// Score from the perspective of `pos.side_to_move`: positive is good for the side to move.
 pub fn evaluate(pos: &Position) -> i32 {
     let mut total = 0i32;
-    for i in 0..64u8 {
-        if let Some(p) = pos.board.get(Square(i)) {
-            let sign = if p.color == Color::White { 1 } else { -1 };
-            total += sign * piece_value(p.kind);
-            if p.kind == PieceKind::Knight {
-                let idx = if p.color == Color::White { i as usize } else { mirror_rank(i) };
-                total += sign * KNIGHT_PST[idx];
+    for color in [Color::White, Color::Black] {
+        let sign = if color == Color::White { 1 } else { -1 };
+        for kind in [PieceKind::Pawn, PieceKind::Knight, PieceKind::Bishop, PieceKind::Rook, PieceKind::Queen] {
+            let bb = pos.board.color_bb(color).intersect(pos.board.kind_bb(kind));
+            let value = piece_value(kind);
+            for sq in bb.iter() {
+                total += sign * value;
+                if kind == PieceKind::Knight {
+                    let idx = if color == Color::White { sq.0 as usize } else { mirror_rank(sq.0) };
+                    total += sign * KNIGHT_PST[idx];
+                }
             }
         }
     }

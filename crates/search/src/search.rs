@@ -1,5 +1,5 @@
 use std::time::{Duration, Instant};
-use spellchess_core::{apply_turn, generate_quiescence_turns, generate_quiescence_turns_from, generate_search_spell_turns, generate_search_turns, legal_moves, PieceKind, Position, Turn};
+use spellchess_core::{apply_turn, generate_quiescence_turns_from, generate_search_spell_turns, generate_search_turns, legal_moves, Color, PieceKind, Position, Turn};
 use crate::eval::{evaluate, piece_value};
 use crate::tables::{HistoryTable, KillerTable};
 use crate::tt::{Bound, TranspositionTable, TtEntry};
@@ -13,7 +13,22 @@ pub enum Budget {
 
 /// Hard cap on how deep a capture-resolution search may run. Without it,
 /// quiescence is unbounded and a single leaf can explode into millions of nodes.
-const MAX_QUIESCENCE_DEPTH: u32 = 4;
+const MAX_QUIESCENCE_DEPTH: u32 = 2;
+const ASPIRATION: i32 = 24;
+const KILLER_PLY_SLACK: u32 = 32;
+
+struct SearchState<'a> {
+    tt: &'a mut TranspositionTable,
+    deadline: Option<Instant>,
+    killers: &'a mut KillerTable,
+    history: &'a mut HistoryTable,
+    nodes: u64,
+    qnodes: u64,
+    spell_gens: u64,
+    tt_hits: u64,
+    nmp_cutoffs: u64,
+    no_spell_cutoffs: u64,
+}
 
 fn is_capture(pos: &Position, turn: &Turn) -> bool {
     pos.board.get(turn.mv.to).is_some() || turn.mv.is_en_passant
@@ -23,50 +38,118 @@ fn no_spell_turns(baseline: &[spellchess_core::PieceMove]) -> Vec<Turn> {
     baseline.iter().copied().map(|mv| Turn { spell: None, mv }).collect()
 }
 
-/// Search `turns` left-to-right with PVS, LMR, and depth-1 futility.
+fn is_pv_window(alpha: i32, beta: i32) -> bool {
+    beta > alpha.saturating_add(1)
+}
+
+fn timed_out(state: &SearchState<'_>) -> bool {
+    matches!(state.deadline, Some(dl) if Instant::now() >= dl)
+}
+
+fn has_non_pawn_material(pos: &Position, color: Color) -> bool {
+    let us = pos.board.color_bb(color);
+    let pawns = pos.board.kind_bb(PieceKind::Pawn);
+    let kings = pos.board.kind_bb(PieceKind::King);
+    !us.minus(pawns).minus(kings).is_empty()
+}
+
+/// Pass the turn without a piece move, ticking opponent cooldowns and field
+/// expiry the same way `apply_turn` would after a real completion. Used only
+/// as a null-move-pruning probe — passing is illegal in the real game.
+fn make_null_move(pos: &Position) -> Position {
+    let mover = pos.side_to_move;
+    let mut next = *pos;
+    let opponent_spells = match mover {
+        Color::White => &mut next.black_spells,
+        Color::Black => &mut next.white_spells,
+    };
+    if opponent_spells.freeze.lock > 0 { opponent_spells.freeze.lock -= 1; }
+    if opponent_spells.jump.lock > 0 { opponent_spells.jump.lock -= 1; }
+    next.ply = pos.ply + 1;
+    next.fields.retain(|f| next.ply <= f.expires_after_ply);
+    next.side_to_move = mover.opposite();
+    next.en_passant = None;
+    next
+}
+
+fn no_spell_captures(pos: &Position, baseline: &[spellchess_core::PieceMove]) -> Vec<Turn> {
+    baseline
+        .iter()
+        .copied()
+        .filter(|mv| pos.board.get(mv.to).is_some() || mv.is_en_passant)
+        .map(|mv| Turn { spell: None, mv })
+        .collect()
+}
+
+fn spell_capture_turns(pos: &Position, baseline: &[spellchess_core::PieceMove]) -> Vec<Turn> {
+    generate_quiescence_turns_from(pos, baseline)
+        .into_iter()
+        .filter(|t| t.spell.is_some())
+        .collect()
+}
+
+/// Search `turns` left-to-right with PVS, LMR, LMP, and depth-1/2 futility.
 /// `move_index` continues across staged generation so late spell pairings still reduce.
 /// Returns `None` on timeout, `Some(true)` on beta cutoff.
 fn search_children(
     pos: &Position,
     turns: Vec<Turn>,
     depth: u32,
+    ply: u32,
     alpha: &mut i32,
     beta: i32,
-    tt: &mut TranspositionTable,
-    deadline: Option<Instant>,
-    killers: &mut KillerTable,
-    history: &mut HistoryTable,
+    state: &mut SearchState<'_>,
     move_index: &mut usize,
     best: &mut i32,
     best_turn: &mut Option<Turn>,
     static_eval: Option<i32>,
+    in_check: bool,
 ) -> Option<bool> {
+    let is_pv = is_pv_window(*alpha, beta);
     for turn in turns {
         let idx = *move_index;
         *move_index += 1;
         let capture = is_capture(pos, &turn);
+        if !is_pv && !in_check && !capture {
+            let lmp = 3 + (depth as usize) * (depth as usize);
+            if idx >= lmp {
+                continue;
+            }
+        }
         if let Some(eval) = static_eval {
-            if idx > 0 && !capture && eval + 250 <= *alpha {
+            let margin = 200 + 150 * depth as i32;
+            if idx > 0 && !capture && eval + margin <= *alpha {
                 continue;
             }
         }
         let next = apply_turn(pos, &turn);
-        let reduce = depth >= 2 && idx >= 2 && !capture;
-        let child_depth = if reduce { depth - 2 } else { depth - 1 };
+        let mut reduction = 0u32;
+        if depth >= 3 && idx >= 2 && !capture && !in_check {
+            reduction = 1;
+            if turn.spell.is_some() {
+                reduction += 1;
+            }
+            if !is_pv && idx >= 6 {
+                reduction += 1;
+            }
+            reduction = reduction.min(depth - 1);
+        }
+        let child_depth = depth - 1 - reduction;
         let old_alpha = *alpha;
-        let mut score = if idx == 0 {
-            match alphabeta(&next, child_depth, -beta, -old_alpha, tt, deadline, killers, history) {
+        let zw = idx > 0 || reduction > 0;
+        let mut score = if !zw {
+            match alphabeta(&next, child_depth, -beta, -old_alpha, ply + 1, state) {
                 Some(s) => -s,
                 None => return None,
             }
         } else {
-            match alphabeta(&next, child_depth, -old_alpha - 1, -old_alpha, tt, deadline, killers, history) {
+            match alphabeta(&next, child_depth, -old_alpha - 1, -old_alpha, ply + 1, state) {
                 Some(s) => -s,
                 None => return None,
             }
         };
-        if idx > 0 && score > old_alpha {
-            score = match alphabeta(&next, depth - 1, -beta, -old_alpha, tt, deadline, killers, history) {
+        if zw && score > old_alpha {
+            score = match alphabeta(&next, depth - 1, -beta, -old_alpha, ply + 1, state) {
                 Some(s) => -s,
                 None => return None,
             };
@@ -80,8 +163,8 @@ fn search_children(
         }
         if *alpha >= beta {
             if !capture {
-                killers.record(depth, turn);
-                history.record(turn.mv.from, turn.mv.to, depth);
+                state.killers.record(ply, turn);
+                state.history.record(turn.mv.from, turn.mv.to, depth);
             }
             return Some(true);
         }
@@ -91,9 +174,21 @@ fn search_children(
 
 pub fn negamax(pos: &Position, depth: u32) -> i32 {
     let mut tt = TranspositionTable::new();
-    let mut killers = KillerTable::new(depth);
+    let mut killers = KillerTable::new(depth + KILLER_PLY_SLACK);
     let mut history = HistoryTable::new();
-    alphabeta(pos, depth, i32::MIN + 1, i32::MAX - 1, &mut tt, None, &mut killers, &mut history)
+    let mut state = SearchState {
+        tt: &mut tt,
+        deadline: None,
+        killers: &mut killers,
+        history: &mut history,
+        nodes: 0,
+        qnodes: 0,
+        spell_gens: 0,
+        tt_hits: 0,
+        nmp_cutoffs: 0,
+        no_spell_cutoffs: 0,
+    };
+    alphabeta(pos, depth, i32::MIN + 1, i32::MAX - 1, 0, &mut state)
         .expect("alphabeta with no deadline (None) never aborts")
 }
 
@@ -103,17 +198,14 @@ pub fn negamax(pos: &Position, depth: u32) -> i32 {
 fn alphabeta(
     pos: &Position,
     depth: u32,
-    alpha: i32,
+    mut alpha: i32,
     beta: i32,
-    tt: &mut TranspositionTable,
-    deadline: Option<Instant>,
-    killers: &mut KillerTable,
-    history: &mut HistoryTable,
+    ply: u32,
+    state: &mut SearchState<'_>,
 ) -> Option<i32> {
-    if let Some(dl) = deadline {
-        if Instant::now() >= dl {
-            return None;
-        }
+    state.nodes += 1;
+    if timed_out(state) {
+        return None;
     }
 
     // King-capture terminal: cheap check, no move generation needed, checked
@@ -123,14 +215,24 @@ fn alphabeta(
         None => return Some(i32::MIN + 1), // loss for the side to move
     };
 
+    let is_pv = is_pv_window(alpha, beta);
     let key = hash_position(pos);
-    let tt_entry = tt.get(key).copied();
+    let tt_entry = state.tt.get(key).copied();
     if let Some(entry) = tt_entry {
         if entry.depth >= depth {
             match entry.bound {
-                Bound::Exact => return Some(entry.score),
-                Bound::Lower if entry.score >= beta => return Some(entry.score),
-                Bound::Upper if entry.score <= alpha => return Some(entry.score),
+                Bound::Exact => {
+                    state.tt_hits += 1;
+                    return Some(entry.score);
+                }
+                Bound::Lower if entry.score >= beta => {
+                    state.tt_hits += 1;
+                    return Some(entry.score);
+                }
+                Bound::Upper if entry.score <= alpha => {
+                    state.tt_hits += 1;
+                    return Some(entry.score);
+                }
                 _ => {}
             }
         }
@@ -148,17 +250,35 @@ fn alphabeta(
                 });
             }
         }
-        return quiescence(pos, alpha, beta, MAX_QUIESCENCE_DEPTH, deadline, generate_quiescence_turns_from(pos, &baseline));
+        return quiescence(pos, alpha, beta, MAX_QUIESCENCE_DEPTH, state, generate_quiescence_turns_from(pos, &baseline));
     }
 
     let in_check = spellchess_core::is_square_attacked(pos, king_sq, pos.side_to_move.opposite());
-    let static_eval = if depth <= 2 { Some(evaluate(pos)) } else { None };
-    if let Some(eval) = static_eval {
-        if !in_check && eval >= beta + 150 * depth as i32 {
-            return Some(eval);
+    let static_eval = evaluate(pos);
+    if !in_check && !is_pv && depth <= 6 && static_eval >= beta + 120 * depth as i32 {
+        return Some(static_eval);
+    }
+    if !in_check && !is_pv && depth <= 2 {
+        let margin = 250 + 150 * depth as i32;
+        if static_eval + margin < alpha {
+            let baseline = legal_moves(pos);
+            return quiescence(pos, alpha, beta, MAX_QUIESCENCE_DEPTH, state, generate_quiescence_turns_from(pos, &baseline));
         }
     }
-    let futility_eval = if depth == 1 { static_eval } else { None };
+    if !in_check && !is_pv && depth >= 3 && has_non_pawn_material(pos, pos.side_to_move) {
+        let r = 2 + depth / 4;
+        let next = make_null_move(pos);
+        let null_depth = depth.saturating_sub(1 + r);
+        if let Some(s) = alphabeta(&next, null_depth, -beta, -beta + 1, ply + 1, state) {
+            if -s >= beta {
+                state.nmp_cutoffs += 1;
+                return Some(-s);
+            }
+        } else {
+            return None;
+        }
+    }
+    let futility_eval = if depth <= 2 && !in_check { Some(static_eval) } else { None };
 
     let baseline = legal_moves(pos);
     let no_spell = no_spell_turns(&baseline);
@@ -175,47 +295,48 @@ fn alphabeta(
     let mut best = i32::MIN + 1;
     let mut best_turn: Option<Turn> = None;
     let original_alpha = alpha;
-    let mut alpha = alpha;
     let mut move_index = 0usize;
+    let killer_pair = state.killers.pair(ply);
 
     if !no_spell_empty {
-        let killer_pair = killers.pair(depth);
-        let ordered = crate::ordering::order_turns(pos, no_spell, tt_move, killer_pair, Some(history));
+        let ordered = crate::ordering::order_turns(pos, no_spell, tt_move, killer_pair, Some(state.history));
         if search_children(
-            pos, ordered, depth, &mut alpha, beta, tt, deadline, killers, history,
-            &mut move_index, &mut best, &mut best_turn, futility_eval,
+            pos, ordered, depth, ply, &mut alpha, beta, state,
+            &mut move_index, &mut best, &mut best_turn, futility_eval, in_check,
         )? {
+            state.no_spell_cutoffs += 1;
             let bound = if best <= original_alpha { Bound::Upper } else if best >= beta { Bound::Lower } else { Bound::Exact };
-            tt.insert(key, TtEntry { depth, score: best, bound, best_move: best_turn });
+            state.tt.insert(key, TtEntry { depth, score: best, bound, best_move: best_turn });
             return Some(best);
         }
     }
 
-    // Depth 1 already futility-prunes quiet spells after the first move; generating
-    // ~1500 freeze pairings just to skip them dominates the clock. Keep spell-enabled
-    // captures (via the quiescence generator) and only fully pair spells at depth 2+.
-    let spells = if depth == 1 {
-        generate_quiescence_turns_from(pos, &baseline)
-            .into_iter()
-            .filter(|t| t.spell.is_some())
-            .collect()
-    } else {
+    // Full freeze/jump pairing is ~1500 turns in the dense opening. Searching
+    // that list on every PV node at remaining-depth 10+ is what made depth 15
+    // blow up. Keep the full pairing only for check evasions and shallow PV
+    // (where a quiet freeze can still change the tactic before the horizon);
+    // everywhere else only spell-enabled captures.
+    let full_spells = in_check || (is_pv && depth <= 3 && ply > 0);
+    let spells = if full_spells {
+        state.spell_gens += 1;
         generate_search_spell_turns(pos, &baseline)
+    } else {
+        spell_capture_turns(pos, &baseline)
     };
     if no_spell_empty && spells.is_empty() {
         return Some(terminal());
     }
     if !spells.is_empty() {
-        let killer_pair = killers.pair(depth);
-        let ordered = crate::ordering::order_turns(pos, spells, tt_move, killer_pair, Some(history));
+        let killer_pair = state.killers.pair(ply);
+        let ordered = crate::ordering::order_turns(pos, spells, tt_move, killer_pair, Some(state.history));
         let _ = search_children(
-            pos, ordered, depth, &mut alpha, beta, tt, deadline, killers, history,
-            &mut move_index, &mut best, &mut best_turn, futility_eval,
+            pos, ordered, depth, ply, &mut alpha, beta, state,
+            &mut move_index, &mut best, &mut best_turn, futility_eval, in_check,
         )?;
     }
 
     let bound = if best <= original_alpha { Bound::Upper } else if best >= beta { Bound::Lower } else { Bound::Exact };
-    tt.insert(key, TtEntry { depth, score: best, bound, best_move: best_turn });
+    state.tt.insert(key, TtEntry { depth, score: best, bound, best_move: best_turn });
     Some(best)
 }
 
@@ -239,7 +360,7 @@ fn dedup_captures(pos: &Position, turns: Vec<Turn>) -> Vec<Turn> {
                     *existing = turn;
                 }
             }
-            None => out.push(turn),
+            None => { out.push(turn); }
         }
     }
     out
@@ -250,13 +371,12 @@ fn quiescence(
     mut alpha: i32,
     beta: i32,
     qdepth: u32,
-    deadline: Option<Instant>,
+    state: &mut SearchState<'_>,
     turns: Vec<Turn>,
 ) -> Option<i32> {
-    if let Some(dl) = deadline {
-        if Instant::now() >= dl {
-            return None;
-        }
+    state.qnodes += 1;
+    if timed_out(state) {
+        return None;
     }
     if pos.board.king_square(pos.side_to_move).is_none() {
         return Some(i32::MIN + 1); // loss for the side to move: its king is already gone
@@ -288,8 +408,8 @@ fn quiescence(
             }
         }
         let next = apply_turn(pos, &turn);
-        let next_turns = generate_quiescence_turns(&next);
-        let score = match quiescence(&next, -beta, -alpha, qdepth - 1, deadline, next_turns) {
+        let next_turns = no_spell_captures(&next, &legal_moves(&next));
+        let score = match quiescence(&next, -beta, -alpha, qdepth - 1, state, next_turns) {
             Some(s) => -s,
             None => return None,
         };
@@ -316,6 +436,22 @@ pub fn best_turn(pos: &Position, depth: u32) -> Option<(Turn, i32)> {
     best
 }
 
+fn dump_profile(label: &str, start: Instant, state: &SearchState<'_>) {
+    if std::env::var_os("SPELLCHESS_PROFILE").is_none() {
+        return;
+    }
+    let elapsed = start.elapsed();
+    let nps = if elapsed.as_secs_f64() > 0.0 {
+        (state.nodes as f64 / elapsed.as_secs_f64()) as u64
+    } else {
+        0
+    };
+    eprintln!(
+        "profile {label}: {elapsed:.3?} nodes={} qnodes={} spell_gens={} tt_hits={} nmp={} no_spell_cut={} nps={}",
+        state.nodes, state.qnodes, state.spell_gens, state.tt_hits, state.nmp_cutoffs, state.no_spell_cutoffs, nps
+    );
+}
+
 pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
     let start = Instant::now();
     let deadline = match budget {
@@ -327,78 +463,74 @@ pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
         Budget::Time(_) => 64,
     };
     let mut tt = TranspositionTable::new();
-    let mut killers = KillerTable::new(max_depth);
+    let mut killers = KillerTable::new(max_depth + KILLER_PLY_SLACK);
     let mut history = HistoryTable::new();
+    let mut state = SearchState {
+        tt: &mut tt,
+        deadline,
+        killers: &mut killers,
+        history: &mut history,
+        nodes: 0,
+        qnodes: 0,
+        spell_gens: 0,
+        tt_hits: 0,
+        nmp_cutoffs: 0,
+        no_spell_cutoffs: 0,
+    };
     let mut best: Option<(Turn, i32)> = None;
+    let mut last_score: Option<i32> = None;
+    let root_key = hash_position(pos);
+
     for depth in 1..=max_depth {
-        if let Some(dl) = deadline {
-            if Instant::now() >= dl {
-                break;
-            }
-        }
-        let root_key = hash_position(pos);
-        let tt_move = tt.get(root_key).and_then(|e| e.best_move);
-        let baseline = legal_moves(pos);
-        let no_spell = no_spell_turns(&baseline);
-        if no_spell.is_empty() && generate_search_spell_turns(pos, &baseline).is_empty() {
+        if timed_out(&state) {
             break;
         }
-        let mut iter_best: Option<(Turn, i32)> = None;
+        let baseline = legal_moves(pos);
+        if baseline.is_empty() && generate_search_spell_turns(pos, &baseline).is_empty() {
+            break;
+        }
         let mut alpha = i32::MIN + 1;
-        let beta = i32::MAX - 1;
+        let mut beta = i32::MAX - 1;
+        if let Some(score) = last_score {
+            alpha = score.saturating_sub(ASPIRATION).max(i32::MIN + 1);
+            beta = score.saturating_add(ASPIRATION).min(i32::MAX - 1);
+        }
         let mut complete = true;
-        let mut node_best = i32::MIN + 1;
-        let mut node_best_turn: Option<Turn> = None;
-        let mut move_index = 0usize;
-        let static_eval = if depth == 1 { Some(evaluate(pos)) } else { None };
-
-        let killer_pair = killers.pair(depth);
-        let ordered_no_spell = crate::ordering::order_turns(pos, no_spell, tt_move, killer_pair, Some(&history));
-        match search_children(
-            pos, ordered_no_spell, depth, &mut alpha, beta, &mut tt, deadline, &mut killers, &mut history,
-            &mut move_index, &mut node_best, &mut node_best_turn, static_eval,
-        ) {
-            Some(false) | Some(true) => {
-                let killer_pair = killers.pair(depth);
-                let spells = generate_search_spell_turns(pos, &baseline);
-                let ordered_spells = crate::ordering::order_turns(pos, spells, tt_move, killer_pair, Some(&history));
-                match search_children(
-                    pos, ordered_spells, depth, &mut alpha, beta, &mut tt, deadline, &mut killers, &mut history,
-                    &mut move_index, &mut node_best, &mut node_best_turn, static_eval,
-                ) {
-                    Some(_) => {}
-                    None => complete = false,
+        loop {
+            match alphabeta(pos, depth, alpha, beta, 0, &mut state) {
+                None => {
+                    complete = false;
+                    break;
+                }
+                Some(score) => {
+                    if score <= alpha && alpha > i32::MIN + 1 {
+                        alpha = i32::MIN + 1;
+                        continue;
+                    }
+                    if score >= beta && beta < i32::MAX - 1 {
+                        beta = i32::MAX - 1;
+                        continue;
+                    }
+                    last_score = Some(score);
+                    if let Some(turn) = state.tt.get(root_key).and_then(|e| e.best_move) {
+                        state.tt.insert(root_key, TtEntry {
+                            depth,
+                            score,
+                            bound: Bound::Exact,
+                            best_move: Some(turn),
+                        });
+                        best = Some((turn, score));
+                    }
+                    break;
                 }
             }
-            None => complete = false,
         }
-        if let Some(turn) = node_best_turn {
-            iter_best = Some((turn, node_best));
-        }
-        if complete {
-            if let Some((turn, score)) = iter_best {
-                // Store the root's own best move too, not just the ones alphabeta finds
-                // for its recursive children -- this is what lets the *next* iteration's
-                // root ordering (and any future search revisiting this exact position)
-                // try the previous iteration's answer first.
-                tt.insert(root_key, TtEntry { depth, score, bound: Bound::Exact, best_move: Some(turn) });
-                best = Some((turn, score));
-            }
-        } else {
-            // Ran out of time mid-iteration: this iteration's ranking is biased
-            // toward whatever prefix of the (capture-first-ordered) turn list got
-            // evaluated before the deadline, so it isn't comparable to a complete
-            // iteration's result -- discard it and keep the last complete
-            // iteration's `best`. Exception: if no iteration has ever completed
-            // (even depth 1 timed out), a partial ranking is still better than
-            // returning None when legal moves clearly exist -- use it as a last
-            // resort only in that case.
-            if best.is_none() {
-                best = iter_best;
-            }
+        if !complete {
             break;
         }
     }
+
+    dump_profile("search", start, &state);
 
     // Deepest last resort: with a very short budget the deadline can fire before
     // even the first root move has been scored, leaving `best` empty. Returning
@@ -444,6 +576,20 @@ mod tests {
                                             // also freezes White's king (d2's 3x3 zone includes e1) and Bxd2
                                             // delivers an independent, equally-winning checkmate that ties.
         let (turn, _score) = best_turn(&pos, 1).expect("a move must be found");
+        assert_eq!(turn.mv.to, Square::from_str("e1").unwrap());
+        assert!(turn.spell.is_some());
+    }
+
+    #[test]
+    fn search_finds_jump_king_capture() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d2").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Bishop }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("b4").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Bishop }));
+        pos.side_to_move = Color::Black;
+        pos.black_spells.freeze.count = 0;
+        let (turn, _score) = search(&pos, Budget::Depth(1)).expect("a move must be found");
         assert_eq!(turn.mv.to, Square::from_str("e1").unwrap());
         assert!(turn.spell.is_some());
     }
@@ -495,14 +641,8 @@ mod tests {
         );
     }
 
-    /// Regression guard for search speed on the starting position after the bitboard
-    /// legal-move rewrite and this-ply freeze/jump reuse (see
-    /// `docs/superpowers/specs/2026-08-13-bitboard-legal-moves-design.md`).
-    /// Measured in a release build on a Pi 5 after staged generation + PVS:
-    /// depth 1 and 3 stay under their old 1s/5s bars; depth 4 is under 3s
-    /// (~0.6s on the starting position).
-    ///
-    /// Depth 1, 3, and 4 share this test so they cannot run in parallel and
+    /// Regression guard for search speed on the starting position.
+    /// Depth 1, 3, 4, 6, and 15 share this test so they cannot run in parallel and
     /// contend for the same cores. The bound is tuned for a release build; debug-build
     /// overhead swamps the algorithmic win. Run with
     /// `cargo test -p spellchess-search --release -- --ignored`.
@@ -535,6 +675,24 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(3),
             "depth-4 search on the starting position must finish in under 3s, took {elapsed:?}",
+        );
+
+        let start = std::time::Instant::now();
+        let result = search(&pos, Budget::Depth(6));
+        let elapsed = start.elapsed();
+        assert!(result.is_some(), "a legal turn exists in the starting position");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "depth-6 search on the starting position must finish in under 5s, took {elapsed:?}",
+        );
+
+        let start = std::time::Instant::now();
+        let result = search(&pos, Budget::Depth(15));
+        let elapsed = start.elapsed();
+        assert!(result.is_some(), "a legal turn exists in the starting position");
+        assert!(
+            elapsed < Duration::from_secs(15),
+            "depth-15 search on the starting position must finish in under 15s, took {elapsed:?}",
         );
     }
 

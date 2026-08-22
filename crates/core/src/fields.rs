@@ -9,9 +9,10 @@ use crate::position::SpellField;
 /// fields to the front in their original relative order (no gaps left behind). This
 /// exactly reproduces `Vec`'s append-after-retain behavior, which matters because
 /// `Position` derives `PartialEq`/`Eq`/`Hash` -- `crates/cli/src/repl.rs`'s
-/// `assert_eq!(session.pos, before)` and `spellchess_search::zobrist::hash_position`
-/// both rely on two positions with the same logical field contents comparing equal
-/// and hashing equal, regardless of the exact push/retain history that produced them.
+/// `assert_eq!(session.pos, before)` relies on two positions with the same logical
+/// field contents comparing equal, regardless of the exact push/retain history that
+/// produced them. Search hashing is Zobrist (`spellchess_search::zobrist`) and is
+/// independent of slot order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FieldSet {
     slots: [Option<SpellField>; 4],

@@ -13,7 +13,7 @@ pub struct TtEntry {
     pub best_move: Option<spellchess_core::Turn>,
 }
 
-const TT_SIZE: usize = 1 << 20;
+const TT_SIZE: usize = 1 << 21;
 
 pub struct TranspositionTable {
     table: Vec<Option<(u64, TtEntry)>>,
@@ -42,7 +42,13 @@ impl TranspositionTable {
     }
 
     pub fn insert(&mut self, key: u64, entry: TtEntry) {
-        self.table[Self::index(key)] = Some((key, entry));
+        let i = Self::index(key);
+        if let Some((old_key, old)) = self.table[i] {
+            if old_key != key && old.depth > entry.depth {
+                return;
+            }
+        }
+        self.table[i] = Some((key, entry));
     }
 }
 

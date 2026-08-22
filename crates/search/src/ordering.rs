@@ -13,7 +13,7 @@ pub fn order_turns(
     killers: [Option<Turn>; 2],
     history: Option<&HistoryTable>,
 ) -> Vec<Turn> {
-    turns.sort_by_key(|t| std::cmp::Reverse(turn_priority(pos, t, tt_move, killers, history)));
+    turns.sort_unstable_by_key(|t| std::cmp::Reverse(turn_priority(pos, t, tt_move, killers, history)));
     turns
 }
 
