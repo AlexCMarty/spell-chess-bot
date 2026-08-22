@@ -234,7 +234,7 @@ Always search the opponent's replies with your own field still on the board.
 | Mate detection | no legal moves + check | `[VERIFIED]` also requires no spell rescue |
 | Insufficient material | draws | `[CODE]` suspended while spells remain |
 | Castling | K/R unmoved, path clear & safe | `[VERIFIED]` plus: rook must not be frozen |
-| Blocking a check | always possible on the ray | `[CODE]` cannot interpose **on** a jump square; other between-squares still can |
+| Blocking a check | always possible on the ray | `[VERIFIED]` cannot interpose **on** a jump square; other between-squares still can |
 
 ## See also
 

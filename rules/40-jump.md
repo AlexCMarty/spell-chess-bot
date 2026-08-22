@@ -99,7 +99,7 @@ the jump square and every square behind it.
 
 ## Checks through a jump square are unblockable
 
-`[CODE]` If a check is delivered along a ray that passes through a live jump square,
+`[VERIFIED]` If a check is delivered along a ray that passes through a live jump square,
 **the defender cannot interpose on that jump square** — it stays transparent, so
 landing there does not break the ray. Other squares between the checker and the
 king are still legal interposition squares.
@@ -114,11 +114,14 @@ The defender's legal answers are therefore:
 2. capture the checking piece, or
 3. interpose on a between-square that is **not** a live jump square.
 
-Measured: with Black's bishop on `b4` checking `Ke1` through a jump field on `d2`,
-White's bishop on `d2` can play `Bd2-c3` (interposition on a non-jump square) and
-can capture the checker on `b4`. White's rook on `a1` had **zero** legal moves
-because a rook on `a1` cannot reach `c3` or `d2`, not because every interposition
-was illegal. The king had `d1 e2 f1 f2`.
+`[VERIFIED]` Measured live against the real engine (test vector 12): with Black's bishop
+on `b4` checking `Ke1` through a jump field on `d2`, White's bishop on `d2` can play
+`Bd2-c3` (interposition on a non-jump square) and can capture the checker on `b4`.
+White's rook on `a1` had **zero** legal moves because a rook on `a1` cannot reach `c3`
+or `d2`, not because every interposition was illegal. The king had `d1 e2 f1 f2`. The
+sharpest evidence: White's own bishop was **already standing on `d2`, unmoved**, when
+the check first appeared — mere occupation of a jump-live square gives zero blocking
+protection, it isn't only that a piece can't be moved there to block.
 
 ## King capture — the signature tactic
 
