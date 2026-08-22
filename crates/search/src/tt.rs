@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bound {
     Exact,
@@ -15,22 +13,36 @@ pub struct TtEntry {
     pub best_move: Option<spellchess_core::Turn>,
 }
 
-#[derive(Default)]
+const TT_SIZE: usize = 1 << 20;
+
 pub struct TranspositionTable {
-    table: HashMap<u64, TtEntry>,
+    table: Vec<Option<(u64, TtEntry)>>,
+}
+
+impl Default for TranspositionTable {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TranspositionTable {
     pub fn new() -> Self {
-        Self::default()
+        TranspositionTable { table: vec![None; TT_SIZE] }
+    }
+
+    fn index(key: u64) -> usize {
+        (key as usize) & (TT_SIZE - 1)
     }
 
     pub fn get(&self, key: u64) -> Option<&TtEntry> {
-        self.table.get(&key)
+        match self.table[Self::index(key)] {
+            Some((k, ref entry)) if k == key => Some(entry),
+            _ => None,
+        }
     }
 
     pub fn insert(&mut self, key: u64, entry: TtEntry) {
-        self.table.insert(key, entry);
+        self.table[Self::index(key)] = Some((key, entry));
     }
 }
 

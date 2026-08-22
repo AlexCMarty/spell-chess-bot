@@ -40,6 +40,8 @@ fn battery() -> Vec<Position> {
     let mut out = vec![Position::starting(), sparse_endgame()];
     out.extend(random_legal_walk(1, 8));
     out.extend(random_legal_walk(2, 8));
+    out.extend(random_legal_walk(7, 12));
+    out.extend(random_legal_walk(99, 12));
     out
 }
 
@@ -178,6 +180,58 @@ fn excluded_jump_targets_do_not_change_next_ply_legal_moves() {
                     "excluded jump target {sq} changed next-ply legal moves after {mv:?}"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn generate_turns_spell_moves_match_legal_moves_on_hypothetical() {
+    for pos in battery() {
+        let turns = generate_turns(&pos);
+        let color = pos.side_to_move;
+        for sq in spells::freeze_targets(&pos, color) {
+            let cast = SpellCast { kind: SpellKind::Freeze, square: sq };
+            let from_turns: Vec<_> = turns.iter().filter(|t| t.spell == Some(cast)).map(|t| t.mv).collect();
+            let hypothetical = with_field(&pos, cast);
+            assert_eq!(
+                sorted(&from_turns), sorted(&legal_moves(&hypothetical)),
+                "freeze@{sq} this-ply moves diverged from legal_moves(hypothetical)"
+            );
+        }
+        for sq in spells::jump_targets(&pos, color) {
+            let cast = SpellCast { kind: SpellKind::Jump, square: sq };
+            let from_turns: Vec<_> = turns.iter().filter(|t| t.spell == Some(cast)).map(|t| t.mv).collect();
+            let hypothetical = with_field(&pos, cast);
+            assert_eq!(
+                sorted(&from_turns), sorted(&legal_moves(&hypothetical)),
+                "jump@{sq} this-ply moves diverged from legal_moves(hypothetical)"
+            );
+        }
+    }
+}
+
+#[test]
+fn generate_search_turns_skips_only_next_ply_inert_baseline_spell_turns() {
+    for pos in battery() {
+        let exhaustive = generate_turns(&pos);
+        let filtered = generate_search_turns(&pos);
+        for turn in exhaustive {
+            if filtered.contains(&turn) {
+                continue;
+            }
+            let Some(cast) = turn.spell else {
+                panic!("search omitted a no-spell turn {turn:?}");
+            };
+            assert!(
+                generate_turns(&pos).iter().any(|t| t.spell.is_none() && t.mv == turn.mv),
+                "omitted spell turn {turn:?} has no no-spell counterpart"
+            );
+            let with_spell = apply_turn(&pos, &turn);
+            let without = apply_turn(&pos, &Turn { spell: None, mv: turn.mv });
+            assert_eq!(
+                sorted(&legal_moves(&with_spell)), sorted(&legal_moves(&without)),
+                "omitted {cast:?} + {:?} changed next-ply legal moves", turn.mv
+            );
         }
     }
 }

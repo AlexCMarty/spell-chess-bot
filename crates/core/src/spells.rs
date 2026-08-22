@@ -107,6 +107,21 @@ pub fn jump_targets(pos: &Position, color: Color) -> Vec<Square> {
 // jump_targets is only ever defined over squares occupied before the mover's move,
 // so a square that's only occupied in a hypothetical (e.g. a move's destination) is
 // never a real candidate even if it would be a first-blocker after that move.
+fn first_occupied_on_ray(pos: &Position, from: Square, dir: (i8, i8)) -> Option<Square> {
+    let occ = pos.board.occupancy().minus(jump_bb(pos));
+    let mut f = from.file() as i8 + dir.0;
+    let mut r = from.rank() as i8 + dir.1;
+    while (0..8).contains(&f) && (0..8).contains(&r) {
+        let sq = Square::new(f as u8, r as u8);
+        if occ.contains(sq) {
+            return Some(sq);
+        }
+        f += dir.0;
+        r += dir.1;
+    }
+    None
+}
+
 fn mark_jump_relevant_squares(scan_pos: &Position, castable_at: &Position, relevant: &mut BTreeSet<Square>) {
     for i in 0..64u8 {
         let sq = Square(i);
@@ -139,11 +154,11 @@ fn mark_jump_relevant_squares(scan_pos: &Position, castable_at: &Position, relev
             // first blocker's square within the field's lifetime, exposing
             // whatever sits behind it on the same ray to a check through the
             // jump-transparent target.
-            if let Some(&first) = crate::rays::walk_ray(scan_pos, sq, dir).last() {
+            if let Some(first) = first_occupied_on_ray(scan_pos, sq, dir) {
                 if castable_at.board.get(first).is_some() {
                     relevant.insert(first);
                 }
-                if let Some(&second) = crate::rays::walk_ray(scan_pos, first, dir).last() {
+                if let Some(second) = first_occupied_on_ray(scan_pos, first, dir) {
                     if castable_at.board.get(second).is_some() {
                         relevant.insert(second);
                     }

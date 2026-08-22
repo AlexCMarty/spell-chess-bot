@@ -216,7 +216,7 @@ fn king_dest_safe(pos: &Position, king_from: Square, dest: Square, enemy: Color)
 }
 
 fn position_with_field(pos: &Position, cast: SpellCast) -> Position {
-    let mut next = pos.clone();
+    let mut next = *pos;
     next.fields.push(SpellField {
         square: cast.square,
         owner: pos.side_to_move,
@@ -226,34 +226,340 @@ fn position_with_field(pos: &Position, cast: SpellCast) -> Position {
     next
 }
 
+fn castle_rook_from(mv: &PieceMove) -> Option<Square> {
+    if !mv.is_castle {
+        return None;
+    }
+    let rank = mv.from.rank();
+    Some(if mv.to.file() == 6 {
+        Square::new(7, rank)
+    } else {
+        Square::new(0, rank)
+    })
+}
+
+fn move_survives_own_freeze(mv: &PieceMove, newly_frozen_us: Bitboard) -> bool {
+    if newly_frozen_us.contains(mv.from) {
+        return false;
+    }
+    if let Some(rook_from) = castle_rook_from(mv) {
+        if newly_frozen_us.contains(rook_from) {
+            return false;
+        }
+    }
+    true
+}
+
+/// True when freezing `hits_them` can add legal moves (check/pin/king-flight/castle),
+/// not merely immobilize our own pieces.
+fn freeze_enemy_affects_this_ply(
+    pos: &Position,
+    hits_them: Bitboard,
+    us: Color,
+    king_sq: Square,
+    checkers: Bitboard,
+    pins: &PinMap,
+    frozen: Bitboard,
+    slider_occ: Bitboard,
+) -> bool {
+    if hits_them.is_empty() {
+        return false;
+    }
+    if !checkers.intersect(hits_them).is_empty() {
+        return true;
+    }
+    for i in 0..64u8 {
+        if pins.pinned.contains(Square(i)) && !pins.rays[i as usize].intersect(hits_them).is_empty() {
+            return true;
+        }
+    }
+    let enemy = us.opposite();
+    for dest in crate::rays::KING_ATTACKS[king_sq.0 as usize].iter() {
+        let attackers = crate::attacks::attackers_to(pos, dest, enemy, frozen, slider_occ);
+        if !attackers.intersect(hits_them).is_empty() {
+            return true;
+        }
+    }
+    let rights = pos.castle_rights;
+    let (ks, qs) = match us {
+        Color::White => (rights.white_kingside, rights.white_queenside),
+        Color::Black => (rights.black_kingside, rights.black_queenside),
+    };
+    if ks {
+        let rank = king_sq.rank();
+        for file in [5u8, 6] {
+            let attackers = crate::attacks::attackers_to(pos, Square::new(file, rank), enemy, frozen, slider_occ);
+            if !attackers.intersect(hits_them).is_empty() {
+                return true;
+            }
+        }
+    }
+    if qs {
+        let rank = king_sq.rank();
+        for file in [2u8, 3] {
+            let attackers = crate::attacks::attackers_to(pos, Square::new(file, rank), enemy, frozen, slider_occ);
+            if !attackers.intersect(hits_them).is_empty() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn jump_may_change_this_ply(
+    pos: &Position,
+    sq: Square,
+    us: Color,
+    king_sq: Square,
+    frozen: Bitboard,
+    jump: Bitboard,
+    slider_occ: Bitboard,
+    checkers: Bitboard,
+) -> bool {
+    if jump.contains(sq) {
+        return false;
+    }
+    let dir: i8 = if us == Color::White { 1 } else { -1 };
+    let start_rank: u8 = if us == Color::White { 1 } else { 6 };
+    let mid_rank = start_rank as i8 + dir;
+    if mid_rank == sq.rank() as i8 {
+        let from = Square::new(sq.file(), start_rank);
+        if let Some(p) = pos.board.get(from) {
+            if p.color == us && p.kind == PieceKind::Pawn && !frozen.contains(from) {
+                return true;
+            }
+        }
+    }
+    if checkers.count() == 1 {
+        let checker = checkers.iter().next().unwrap();
+        if crate::rays::between(king_sq, checker).contains(sq) {
+            return true;
+        }
+    }
+    let sliders = pos.board.kind_bb(PieceKind::Bishop)
+        .union(pos.board.kind_bb(PieceKind::Rook))
+        .union(pos.board.kind_bb(PieceKind::Queen));
+    let our_slider_attackers = crate::attacks::attackers_to(pos, sq, us, frozen, slider_occ)
+        .intersect(sliders);
+    if !our_slider_attackers.is_empty() {
+        return true;
+    }
+    let enemy = us.opposite();
+    let enemy_sliders = pos.board.color_bb(enemy).intersect(sliders).minus(frozen);
+    if enemy_sliders.contains(sq) {
+        // Jumping an enemy slider can hide it as an attacker (walk-from-target).
+        return true;
+    }
+    for slider in enemy_sliders.iter() {
+        if crate::rays::between(slider, king_sq).contains(sq) {
+            return true;
+        }
+    }
+    false
+}
+
+fn occupancy_after_move(pos: &Position, mv: &PieceMove) -> Bitboard {
+    let mut occ = pos.board.occupancy().without(mv.from).with(mv.to);
+    if mv.is_en_passant {
+        occ = occ.without(Square::new(mv.to.file(), mv.from.rank()));
+    }
+    if let Some(rook_from) = castle_rook_from(mv) {
+        let rank = mv.from.rank();
+        let rook_to = if mv.to.file() == 6 {
+            Square::new(5, rank)
+        } else {
+            Square::new(3, rank)
+        };
+        occ = occ.without(rook_from).with(rook_to);
+    }
+    occ
+}
+
+fn is_capture(pos: &Position, mv: &PieceMove) -> bool {
+    pos.board.get(mv.to).is_some() || mv.is_en_passant
+}
+
+fn in_baseline(baseline: &[PieceMove], mv: PieceMove) -> bool {
+    baseline.iter().any(|b| *b == mv)
+}
+
+fn emit_spell_turns(
+    turns: &mut Vec<Turn>,
+    pos: &Position,
+    baseline: &[PieceMove],
+    cast: SpellCast,
+    moves: impl IntoIterator<Item = PieceMove>,
+    skip_dominated: bool,
+) {
+    for mv in moves {
+        if skip_dominated && in_baseline(baseline, mv) {
+            match cast.kind {
+                SpellKind::Freeze => {
+                    let zone = crate::spells::FREEZE_ZONE[cast.square.0 as usize];
+                    if zone.intersect(occupancy_after_move(pos, &mv)).is_empty() {
+                        continue;
+                    }
+                }
+                SpellKind::Jump => {
+                    if !occupancy_after_move(pos, &mv).contains(cast.square) {
+                        continue;
+                    }
+                }
+            }
+        }
+        turns.push(Turn { spell: Some(cast), mv });
+    }
+}
+
 fn generate_turns_from(
     pos: &Position,
-    baseline: Vec<PieceMove>,
+    baseline: &[PieceMove],
     freeze_targets: Vec<Square>,
     jump_targets: Vec<Square>,
+    skip_dominated: bool,
 ) -> Vec<Turn> {
-    let mut turns: Vec<Turn> = baseline.into_iter().map(|mv| Turn { spell: None, mv }).collect();
+    let mut turns: Vec<Turn> = baseline.iter().copied().map(|mv| Turn { spell: None, mv }).collect();
+    if freeze_targets.is_empty() && jump_targets.is_empty() {
+        return turns;
+    }
+
+    let us = pos.side_to_move;
+    let enemy = us.opposite();
+    let frozen = crate::spells::frozen_bb(pos);
+    let jump = crate::spells::jump_bb(pos);
+    let occ = pos.board.occupancy();
+    let slider_occ = occ.minus(jump);
+    let our_bb = pos.board.color_bb(us);
+    let their_bb = pos.board.color_bb(enemy);
+    let king_sq = pos.board.king_square(us);
+    let (checkers, pins) = match king_sq {
+        Some(k) => (
+            crate::attacks::attackers_to(pos, k, enemy, frozen, slider_occ),
+            pins_of(pos, k, us, frozen, jump),
+        ),
+        None => (Bitboard::EMPTY, PinMap { pinned: Bitboard::EMPTY, rays: [Bitboard::EMPTY; 64] }),
+    };
 
     for sq in freeze_targets {
         let cast = SpellCast { kind: SpellKind::Freeze, square: sq };
-        let hypothetical = position_with_field(pos, cast);
-        turns.extend(legal_moves(&hypothetical).into_iter().map(|mv| Turn { spell: Some(cast), mv }));
+        let zone = crate::spells::FREEZE_ZONE[sq.0 as usize];
+        let newly = zone.minus(frozen);
+        let hits_us = newly.intersect(our_bb);
+        let hits_them = newly.intersect(their_bb);
+        let needs_recompute = match king_sq {
+            Some(k) => {
+                freeze_enemy_affects_this_ply(pos, hits_them, us, k, checkers, &pins, frozen, slider_occ)
+                    || (!hits_them.is_empty() && pos.en_passant.is_some())
+                    || (!hits_them.is_empty() && baseline.iter().any(|mv| {
+                        pos.board.get(mv.to).is_some_and(|p| p.kind == PieceKind::King && p.color == enemy)
+                    }))
+            }
+            None => !hits_them.is_empty(),
+        };
+        if needs_recompute {
+            let hypothetical = position_with_field(pos, cast);
+            emit_spell_turns(&mut turns, pos, baseline, cast, legal_moves(&hypothetical), skip_dominated);
+        } else if hits_us.is_empty() {
+            emit_spell_turns(&mut turns, pos, baseline, cast, baseline.iter().copied(), skip_dominated);
+        } else {
+            emit_spell_turns(
+                &mut turns,
+                pos,
+                baseline,
+                cast,
+                baseline.iter().copied().filter(|mv| move_survives_own_freeze(mv, hits_us)),
+                skip_dominated,
+            );
+        }
     }
     for sq in jump_targets {
         let cast = SpellCast { kind: SpellKind::Jump, square: sq };
-        let hypothetical = position_with_field(pos, cast);
-        turns.extend(legal_moves(&hypothetical).into_iter().map(|mv| Turn { spell: Some(cast), mv }));
+        let may_change = match king_sq {
+            Some(k) => jump_may_change_this_ply(pos, sq, us, k, frozen, jump, slider_occ, checkers),
+            None => true,
+        };
+        if may_change {
+            let hypothetical = position_with_field(pos, cast);
+            emit_spell_turns(&mut turns, pos, baseline, cast, legal_moves(&hypothetical), skip_dominated);
+        } else {
+            emit_spell_turns(&mut turns, pos, baseline, cast, baseline.iter().copied(), skip_dominated);
+        }
     }
     turns
 }
 
+fn generate_quiescence_from(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn> {
+    let mut turns: Vec<Turn> = baseline
+        .iter()
+        .copied()
+        .filter(|mv| is_capture(pos, mv))
+        .map(|mv| Turn { spell: None, mv })
+        .collect();
+
+    let us = pos.side_to_move;
+    let enemy = us.opposite();
+    let frozen = crate::spells::frozen_bb(pos);
+    let jump = crate::spells::jump_bb(pos);
+    let slider_occ = pos.board.occupancy().minus(jump);
+    let Some(king_sq) = pos.board.king_square(us) else {
+        return turns;
+    };
+    let checkers = crate::attacks::attackers_to(pos, king_sq, enemy, frozen, slider_occ);
+    let pins = pins_of(pos, king_sq, us, frozen, jump);
+
+    if pos.spells(us).jump.castable() {
+        for sq in crate::spells::jump_targets(pos, us) {
+            if !jump_may_change_this_ply(pos, sq, us, king_sq, frozen, jump, slider_occ, checkers) {
+                continue;
+            }
+            let cast = SpellCast { kind: SpellKind::Jump, square: sq };
+            for mv in legal_moves(&position_with_field(pos, cast)) {
+                if is_capture(pos, &mv) && !in_baseline(baseline, mv) {
+                    turns.push(Turn { spell: Some(cast), mv });
+                }
+            }
+        }
+    }
+
+    if pos.spells(us).freeze.castable() && (!checkers.is_empty() || !pins.pinned.is_empty()) {
+        let their_bb = pos.board.color_bb(enemy);
+        for sq in crate::spells::freeze_targets(pos, us) {
+            let newly = crate::spells::FREEZE_ZONE[sq.0 as usize].minus(frozen);
+            let hits_them = newly.intersect(their_bb);
+            if !freeze_enemy_affects_this_ply(pos, hits_them, us, king_sq, checkers, &pins, frozen, slider_occ) {
+                continue;
+            }
+            let cast = SpellCast { kind: SpellKind::Freeze, square: sq };
+            for mv in legal_moves(&position_with_field(pos, cast)) {
+                if is_capture(pos, &mv) && !in_baseline(baseline, mv) {
+                    turns.push(Turn { spell: Some(cast), mv });
+                }
+            }
+        }
+    }
+    turns
+}
+
+/// Captures for quiescence: no-spell captures plus spell casts that enable a
+/// capture that was not already legal. Freeze/jump pairings that only retag an
+/// existing capture are omitted.
+pub fn generate_quiescence_turns_from(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn> {
+    generate_quiescence_from(pos, baseline)
+}
+
+pub fn generate_quiescence_turns(pos: &Position) -> Vec<Turn> {
+    generate_quiescence_from(pos, &legal_moves(pos))
+}
+
 pub fn generate_turns(pos: &Position) -> Vec<Turn> {
     let color = pos.side_to_move;
+    let baseline = legal_moves(pos);
     generate_turns_from(
         pos,
-        legal_moves(pos),
+        &baseline,
         crate::spells::freeze_targets(pos, color),
         crate::spells::jump_targets(pos, color),
+        false,
     )
 }
 
@@ -262,7 +568,7 @@ pub fn generate_search_turns(pos: &Position) -> Vec<Turn> {
     let baseline = legal_moves(pos);
     let freeze_targets = crate::spells::relevant_freeze_targets(pos, color, &baseline);
     let jump_targets = crate::spells::relevant_jump_targets(pos, color, &baseline);
-    generate_turns_from(pos, baseline, freeze_targets, jump_targets)
+    generate_turns_from(pos, &baseline, freeze_targets, jump_targets, true)
 }
 
 pub fn apply_turn(pos: &Position, turn: &Turn) -> Position {
@@ -513,6 +819,15 @@ mod tests {
     fn generate_search_turns_is_never_larger_than_generate_turns() {
         let pos = Position::starting();
         assert!(generate_search_turns(&pos).len() <= generate_turns(&pos).len());
+    }
+
+    #[test]
+    fn generate_search_turns_is_a_subset_of_generate_turns() {
+        let pos = Position::starting();
+        let exhaustive = generate_turns(&pos);
+        for t in generate_search_turns(&pos) {
+            assert!(exhaustive.contains(&t), "search-only turn missing from exhaustive generate_turns");
+        }
     }
 
     #[test]

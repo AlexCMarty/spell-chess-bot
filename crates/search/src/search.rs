@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
-use spellchess_core::{apply_turn, generate_search_turns, Position, Turn};
-use crate::eval::evaluate;
+use spellchess_core::{apply_turn, generate_quiescence_turns, generate_quiescence_turns_from, generate_search_turns, legal_moves, PieceKind, Position, Turn};
+use crate::eval::{evaluate, piece_value};
 use crate::tables::{HistoryTable, KillerTable};
 use crate::tt::{Bound, TranspositionTable, TtEntry};
 use crate::zobrist::hash_position;
@@ -13,7 +13,7 @@ pub enum Budget {
 
 /// Hard cap on how deep a capture-resolution search may run. Without it,
 /// quiescence is unbounded and a single leaf can explode into millions of nodes.
-const MAX_QUIESCENCE_DEPTH: u32 = 6;
+const MAX_QUIESCENCE_DEPTH: u32 = 4;
 
 pub fn negamax(pos: &Position, depth: u32) -> i32 {
     let mut tt = TranspositionTable::new();
@@ -62,21 +62,28 @@ fn alphabeta(
         }
     }
 
-    let turns = generate_search_turns(pos);
-    if turns.is_empty() {
-        // No legal turns: checkmate or stalemate. We already have king_sq,
-        // so this is one attack check, not a second generate_turns call.
-        return Some(if spellchess_core::is_square_attacked(pos, king_sq, pos.side_to_move.opposite()) {
-            i32::MIN + 1 // checkmated: loss for the side to move
-        } else {
-            0 // stalemate
-        });
+    if depth == 0 {
+        let baseline = legal_moves(pos);
+        if baseline.is_empty() {
+            let turns = generate_search_turns(pos);
+            if turns.is_empty() {
+                return Some(if spellchess_core::is_square_attacked(pos, king_sq, pos.side_to_move.opposite()) {
+                    i32::MIN + 1
+                } else {
+                    0
+                });
+            }
+        }
+        return quiescence(pos, alpha, beta, MAX_QUIESCENCE_DEPTH, deadline, generate_quiescence_turns_from(pos, &baseline));
     }
 
-    if depth == 0 {
-        // Hand the already-generated turn list straight to quiescence rather than
-        // making it call generate_turns again on the same position.
-        return quiescence(pos, alpha, beta, MAX_QUIESCENCE_DEPTH, deadline, turns);
+    let turns = generate_search_turns(pos);
+    if turns.is_empty() {
+        return Some(if spellchess_core::is_square_attacked(pos, king_sq, pos.side_to_move.opposite()) {
+            i32::MIN + 1
+        } else {
+            0
+        });
     }
 
     // A probe that didn't short-circuit above can still hand us a move-ordering hint:
@@ -88,12 +95,27 @@ fn alphabeta(
     let mut best = i32::MIN + 1;
     let mut best_turn: Option<Turn> = None;
     let original_alpha = alpha;
-    for turn in ordered {
+    let static_eval = if depth == 1 { Some(evaluate(pos)) } else { None };
+    for (idx, turn) in ordered.into_iter().enumerate() {
+        let is_capture = pos.board.get(turn.mv.to).is_some() || turn.mv.is_en_passant;
+        if let Some(eval) = static_eval {
+            if idx > 0 && !is_capture && eval + 250 <= alpha {
+                continue;
+            }
+        }
         let next = apply_turn(pos, &turn);
-        let score = match alphabeta(&next, depth - 1, -beta, -alpha, tt, deadline, killers, history) {
+        let reduce = depth >= 2 && idx >= 3 && !is_capture;
+        let search_depth = if reduce { depth - 2 } else { depth - 1 };
+        let mut score = match alphabeta(&next, search_depth, -beta, -alpha, tt, deadline, killers, history) {
             Some(s) => -s,
             None => return None,
         };
+        if reduce && score > alpha {
+            score = match alphabeta(&next, depth - 1, -beta, -alpha, tt, deadline, killers, history) {
+                Some(s) => -s,
+                None => return None,
+            };
+        }
         if score > best {
             best = score;
             best_turn = Some(turn);
@@ -102,7 +124,6 @@ fn alphabeta(
             alpha = best;
         }
         if alpha >= beta {
-            let is_capture = pos.board.get(turn.mv.to).is_some() || turn.mv.is_en_passant;
             if !is_capture {
                 killers.record(depth, turn);
                 history.record(turn.mv.from, turn.mv.to, depth);
@@ -171,8 +192,21 @@ fn quiescence(
     }
 
     for turn in dedup_captures(pos, turns) {
+        let captured_kind = if turn.mv.is_en_passant {
+            Some(PieceKind::Pawn)
+        } else {
+            pos.board.get(turn.mv.to).map(|p| p.kind)
+        };
+        if let Some(kind) = captured_kind {
+            if kind != PieceKind::King {
+                let gain = piece_value(kind);
+                if stand_pat + gain + 200 < alpha {
+                    continue;
+                }
+            }
+        }
         let next = apply_turn(pos, &turn);
-        let next_turns = generate_search_turns(&next);
+        let next_turns = generate_quiescence_turns(&next);
         let score = match quiescence(&next, -beta, -alpha, qdepth - 1, deadline, next_turns) {
             Some(s) => -s,
             None => return None,
@@ -368,15 +402,15 @@ mod tests {
     }
 
     /// Regression guard for search speed on the starting position after the bitboard
-    /// legal-move rewrite (see
+    /// legal-move rewrite and this-ply freeze/jump reuse (see
     /// `docs/superpowers/specs/2026-08-13-bitboard-legal-moves-design.md`).
-    /// Measured in a release build on a Pi 5: depth 1 ~0.33s, depth 2 ~4.0s,
-    /// depth 3 ~50s (depth 3 still misses the 5s spec bar; see
-    /// `depth3_budget_stays_bounded_on_a_realistic_board`).
+    /// Measured in a release build on a Pi 5: depth 1 ~0.04s, depth 2 ~0.7s,
+    /// depth 3 ~4.5s.
     ///
-    /// The bound is tuned for a release build; debug-build overhead (no inlining, no
-    /// bounds-check elision, more expensive allocation) swamps the algorithmic win here
-    /// almost entirely. Run with `cargo test -p spellchess-search --release -- --ignored`.
+    /// Depth 1 and depth 3 share this test so they cannot run in parallel and
+    /// contend for the same cores. The bound is tuned for a release build; debug-build
+    /// overhead swamps the algorithmic win. Run with
+    /// `cargo test -p spellchess-search --release -- --ignored`.
     #[test]
     #[ignore = "slow and misleading in a debug build; see doc comment"]
     fn depth_budget_stays_bounded_on_a_realistic_board() {
@@ -389,15 +423,7 @@ mod tests {
             elapsed < Duration::from_secs(1),
             "depth-1 search on the starting position must finish in under 1s, took {elapsed:?}",
         );
-    }
 
-    /// Knowingly over the 5s spec bar in release (~50s on a Pi 5 starting position;
-    /// see `depth_budget_stays_bounded_on_a_realistic_board`). Kept ignored as a
-    /// skipped budget, not a passing test. Debug is slower still. Do not un-ignore.
-    #[test]
-    #[ignore = "knowingly red in release (~50s vs 5s on Pi 5); also slow/misleading in debug"]
-    fn depth3_budget_stays_bounded_on_a_realistic_board() {
-        let pos = Position::starting();
         let start = std::time::Instant::now();
         let result = search(&pos, Budget::Depth(3));
         let elapsed = start.elapsed();

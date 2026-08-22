@@ -30,19 +30,6 @@ fn mirror_rank(i: u8) -> usize {
     (i ^ 56) as usize
 }
 
-fn positional(pos: &Position) -> i32 {
-    let mut score = 0i32;
-    for i in 0..64u8 {
-        if let Some(p) = pos.board.get(Square(i)) {
-            if p.kind == PieceKind::Knight {
-                let idx = if p.color == Color::White { i as usize } else { mirror_rank(i) };
-                score += if p.color == Color::White { KNIGHT_PST[idx] } else { -KNIGHT_PST[idx] };
-            }
-        }
-    }
-    score
-}
-
 fn spell_tempo(pos: &Position, color: Color) -> i32 {
     let s = pos.spells(color);
     s.freeze.count as i32 * 8 + s.jump.count as i32 * 15
@@ -61,78 +48,56 @@ fn jump_threat_bonus(pos: &Position, color: Color) -> i32 {
         Some(sq) => sq,
         None => return 0,
     };
-    for i in 0..64u8 {
-        let sq = Square(i);
-        let piece = match pos.board.get(sq) {
-            Some(p) if p.color == color && matches!(p.kind, PieceKind::Bishop | PieceKind::Rook | PieceKind::Queen) => p,
-            _ => continue,
-        };
-        let hits = match piece.kind {
-            PieceKind::Rook => slider_threatens_through_one_blocker(pos, sq, enemy_king, &spellchess_core::rays::ROOK_DIRS),
-            PieceKind::Bishop => slider_threatens_through_one_blocker(pos, sq, enemy_king, &spellchess_core::rays::BISHOP_DIRS),
-            PieceKind::Queen => {
-                slider_threatens_through_one_blocker(pos, sq, enemy_king, &spellchess_core::rays::ROOK_DIRS)
-                    || slider_threatens_through_one_blocker(pos, sq, enemy_king, &spellchess_core::rays::BISHOP_DIRS)
-            }
+    let sliders = pos.board.color_bb(color).intersect(
+        pos.board.kind_bb(PieceKind::Bishop)
+            .union(pos.board.kind_bb(PieceKind::Rook))
+            .union(pos.board.kind_bb(PieceKind::Queen)),
+    );
+    let occ = pos.board.occupancy();
+    for sq in sliders.iter() {
+        let piece = pos.board.get(sq).unwrap();
+        let on_ray = match piece.kind {
+            PieceKind::Rook => on_ortho(sq, enemy_king),
+            PieceKind::Bishop => on_diag(sq, enemy_king),
+            PieceKind::Queen => on_ortho(sq, enemy_king) || on_diag(sq, enemy_king),
             _ => false,
         };
-        if hits {
+        if !on_ray {
+            continue;
+        }
+        let between = spellchess_core::rays::between(sq, enemy_king);
+        if between.intersect(occ).count() == 1 {
             return 60;
         }
     }
     0
 }
 
-/// Walks the full ray from `from` in each of `dirs` (ignoring `walk_ray`'s stop-at-first-
-/// blocker behavior, since we need to see past exactly one blocker to the king behind it).
-/// Returns true if `king` lies on one of these rays with exactly one occupied square
-/// between `from` and `king` — the pattern a single jump cast on that blocker would clear.
-fn slider_threatens_through_one_blocker(pos: &Position, from: Square, king: Square, dirs: &[(i8, i8)]) -> bool {
-    for &dir in dirs {
-        let (mut f, mut r) = (from.file() as i8, from.rank() as i8);
-        let mut blockers = 0;
-        loop {
-            f += dir.0;
-            r += dir.1;
-            if !(0..8).contains(&f) || !(0..8).contains(&r) {
-                break;
-            }
-            let sq = Square::new(f as u8, r as u8);
-            if sq == king {
-                if blockers == 1 {
-                    return true;
-                }
-                break;
-            }
-            if pos.board.get(sq).is_some() {
-                blockers += 1;
-                if blockers > 1 {
-                    break; // more than one blocker: no single jump clears this line
-                }
-            }
-        }
-    }
-    false
+fn on_ortho(a: Square, b: Square) -> bool {
+    a.file() == b.file() || a.rank() == b.rank()
+}
+
+fn on_diag(a: Square, b: Square) -> bool {
+    let df = a.file() as i8 - b.file() as i8;
+    let dr = a.rank() as i8 - b.rank() as i8;
+    df.abs() == dr.abs() && df != 0
 }
 
 /// Score from the perspective of `pos.side_to_move`: positive is good for the side to move.
 pub fn evaluate(pos: &Position) -> i32 {
-    let mut white = 0i32;
-    let mut black = 0i32;
-    for i in 0..64 {
+    let mut total = 0i32;
+    for i in 0..64u8 {
         if let Some(p) = pos.board.get(Square(i)) {
-            let v = piece_value(p.kind);
-            match p.color {
-                Color::White => white += v,
-                Color::Black => black += v,
+            let sign = if p.color == Color::White { 1 } else { -1 };
+            total += sign * piece_value(p.kind);
+            if p.kind == PieceKind::Knight {
+                let idx = if p.color == Color::White { i as usize } else { mirror_rank(i) };
+                total += sign * KNIGHT_PST[idx];
             }
         }
     }
-    let material = white - black;
-    let position_term = positional(pos);
-    let tempo_term = spell_tempo(pos, Color::White) - spell_tempo(pos, Color::Black);
-    let threat_term = jump_threat_bonus(pos, Color::White) - jump_threat_bonus(pos, Color::Black);
-    let total = material + position_term + tempo_term + threat_term;
+    total += spell_tempo(pos, Color::White) - spell_tempo(pos, Color::Black);
+    total += jump_threat_bonus(pos, Color::White) - jump_threat_bonus(pos, Color::Black);
     match pos.side_to_move {
         Color::White => total,
         Color::Black => -total,
