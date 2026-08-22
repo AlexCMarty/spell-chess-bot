@@ -268,8 +268,8 @@ fn freeze_enemy_affects_this_ply(
     if !checkers.intersect(hits_them).is_empty() {
         return true;
     }
-    for i in 0..64u8 {
-        if pins.pinned.contains(Square(i)) && !pins.rays[i as usize].intersect(hits_them).is_empty() {
+    for sq in pins.pinned.iter() {
+        if !pins.rays[sq.0 as usize].intersect(hits_them).is_empty() {
             return true;
         }
     }
@@ -417,8 +417,13 @@ fn generate_turns_from(
     freeze_targets: Vec<Square>,
     jump_targets: Vec<Square>,
     skip_dominated: bool,
+    emit_baseline: bool,
 ) -> Vec<Turn> {
-    let mut turns: Vec<Turn> = baseline.iter().copied().map(|mv| Turn { spell: None, mv }).collect();
+    let mut turns: Vec<Turn> = if emit_baseline {
+        baseline.iter().copied().map(|mv| Turn { spell: None, mv }).collect()
+    } else {
+        Vec::new()
+    };
     if freeze_targets.is_empty() && jump_targets.is_empty() {
         return turns;
     }
@@ -560,6 +565,7 @@ pub fn generate_turns(pos: &Position) -> Vec<Turn> {
         crate::spells::freeze_targets(pos, color),
         crate::spells::jump_targets(pos, color),
         false,
+        true,
     )
 }
 
@@ -568,7 +574,21 @@ pub fn generate_search_turns(pos: &Position) -> Vec<Turn> {
     let baseline = legal_moves(pos);
     let freeze_targets = crate::spells::relevant_freeze_targets(pos, color, &baseline);
     let jump_targets = crate::spells::relevant_jump_targets(pos, color, &baseline);
-    generate_turns_from(pos, &baseline, freeze_targets, jump_targets, true)
+    generate_turns_from(pos, &baseline, freeze_targets, jump_targets, true, true)
+}
+
+/// Spell-paired search turns only (no no-spell baseline copies). Search uses this
+/// after searching no-spell moves, so a beta cutoff can skip the expensive pairing.
+pub fn generate_search_spell_turns(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn> {
+    let color = pos.side_to_move;
+    generate_turns_from(
+        pos,
+        baseline,
+        crate::spells::relevant_freeze_targets(pos, color, baseline),
+        crate::spells::relevant_jump_targets(pos, color, baseline),
+        true,
+        false,
+    )
 }
 
 pub fn apply_turn(pos: &Position, turn: &Turn) -> Position {
@@ -828,6 +848,28 @@ mod tests {
         for t in generate_search_turns(&pos) {
             assert!(exhaustive.contains(&t), "search-only turn missing from exhaustive generate_turns");
         }
+    }
+
+    #[test]
+    fn generate_search_spell_turns_plus_baseline_matches_generate_search_turns() {
+        let pos = Position::starting();
+        let baseline = legal_moves(&pos);
+        let mut combined: Vec<Turn> = baseline.iter().copied().map(|mv| Turn { spell: None, mv }).collect();
+        combined.extend(generate_search_spell_turns(&pos, &baseline));
+        let mut full = generate_search_turns(&pos);
+        let key = |t: &Turn| {
+            (
+                t.spell.map(|s| (s.kind as u8, s.square.0)),
+                t.mv.from.0,
+                t.mv.to.0,
+                t.mv.promotion.map(|p| p as u8),
+                t.mv.is_en_passant,
+                t.mv.is_castle,
+            )
+        };
+        combined.sort_by_key(key);
+        full.sort_by_key(key);
+        assert_eq!(combined, full);
     }
 
     #[test]

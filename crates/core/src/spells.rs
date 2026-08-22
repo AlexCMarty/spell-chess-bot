@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use crate::bitboard::Bitboard;
 use crate::movegen::PieceMove;
 use crate::position::{Position, SpellField, SpellKind};
@@ -122,10 +121,33 @@ fn first_occupied_on_ray(pos: &Position, from: Square, dir: (i8, i8)) -> Option<
     None
 }
 
-fn mark_jump_relevant_squares(scan_pos: &Position, castable_at: &Position, relevant: &mut BTreeSet<Square>) {
-    for i in 0..64u8 {
-        let sq = Square(i);
-        let Some(piece) = scan_pos.board.get(sq) else { continue };
+fn mark_jump_blockers(scan_pos: &Position, castable_at: &Position, sq: Square, dirs: &[(i8, i8)], relevant: &mut Bitboard) {
+    for &dir in dirs {
+        // Mark the first blocker *and* the one behind it: the field survives
+        // for the caster's own move plus the opponent's one reply, so at most
+        // one more piece (the opponent's own moving piece) can vacate the
+        // first blocker's square within the field's lifetime, exposing
+        // whatever sits behind it on the same ray to a check through the
+        // jump-transparent target.
+        if let Some(first) = first_occupied_on_ray(scan_pos, sq, dir) {
+            if castable_at.board.get(first).is_some() {
+                *relevant = relevant.with(first);
+            }
+            if let Some(second) = first_occupied_on_ray(scan_pos, first, dir) {
+                if castable_at.board.get(second).is_some() {
+                    *relevant = relevant.with(second);
+                }
+            }
+        }
+    }
+}
+
+fn mark_jump_relevant_squares(scan_pos: &Position, castable_at: &Position, relevant: &mut Bitboard) {
+    let sliders = scan_pos.board.kind_bb(PieceKind::Bishop)
+        .union(scan_pos.board.kind_bb(PieceKind::Rook))
+        .union(scan_pos.board.kind_bb(PieceKind::Queen));
+    for sq in sliders.iter() {
+        let piece = scan_pos.board.get(sq).unwrap();
 
         // is_square_attacked detects a slider attacker by walking a ray *from the
         // target square* and taking whatever it finds last -- exactly the same
@@ -134,45 +156,20 @@ fn mark_jump_relevant_squares(scan_pos: &Position, castable_at: &Position, relev
         // anything) is behind it instead, hiding the slider as an attacker. So any
         // square a slider occupies is always a relevant jump target in its own
         // right, independent of whether it blocks anyone else's ray.
-        if matches!(piece.kind, PieceKind::Rook | PieceKind::Bishop | PieceKind::Queen)
-            && castable_at.board.get(sq).is_some()
-        {
-            relevant.insert(sq);
+        if castable_at.board.get(sq).is_some() {
+            *relevant = relevant.with(sq);
         }
 
-        let mut dirs: Vec<(i8, i8)> = Vec::new();
         if matches!(piece.kind, PieceKind::Rook | PieceKind::Queen) {
-            dirs.extend_from_slice(&crate::rays::ROOK_DIRS);
+            mark_jump_blockers(scan_pos, castable_at, sq, &crate::rays::ROOK_DIRS, relevant);
         }
         if matches!(piece.kind, PieceKind::Bishop | PieceKind::Queen) {
-            dirs.extend_from_slice(&crate::rays::BISHOP_DIRS);
-        }
-        for dir in dirs {
-            // Mark the first blocker *and* the one behind it: the field survives
-            // for the caster's own move plus the opponent's one reply, so at most
-            // one more piece (the opponent's own moving piece) can vacate the
-            // first blocker's square within the field's lifetime, exposing
-            // whatever sits behind it on the same ray to a check through the
-            // jump-transparent target.
-            if let Some(first) = first_occupied_on_ray(scan_pos, sq, dir) {
-                if castable_at.board.get(first).is_some() {
-                    relevant.insert(first);
-                }
-                if let Some(second) = first_occupied_on_ray(scan_pos, first, dir) {
-                    if castable_at.board.get(second).is_some() {
-                        relevant.insert(second);
-                    }
-                }
-            }
+            mark_jump_blockers(scan_pos, castable_at, sq, &crate::rays::BISHOP_DIRS, relevant);
         }
     }
 
-    for i in 0..64u8 {
-        let sq = Square(i);
-        let Some(piece) = scan_pos.board.get(sq) else { continue };
-        if piece.kind != PieceKind::Pawn {
-            continue;
-        }
+    for sq in scan_pos.board.kind_bb(PieceKind::Pawn).iter() {
+        let piece = scan_pos.board.get(sq).unwrap();
         let start_rank: u8 = if piece.color == Color::White { 1 } else { 6 };
         if sq.rank() != start_rank {
             continue;
@@ -180,7 +177,7 @@ fn mark_jump_relevant_squares(scan_pos: &Position, castable_at: &Position, relev
         let dir: i8 = if piece.color == Color::White { 1 } else { -1 };
         let mid = Square::new(sq.file(), (sq.rank() as i8 + dir) as u8);
         if castable_at.board.get(mid).is_some() {
-            relevant.insert(mid);
+            *relevant = relevant.with(mid);
         }
     }
 }
@@ -204,15 +201,14 @@ pub fn relevant_jump_targets(pos: &Position, color: Color, baseline: &[PieceMove
     if !pos.spells(color).jump.castable() {
         return Vec::new();
     }
-    let mut relevant: BTreeSet<Square> = BTreeSet::new();
+    let mut relevant = Bitboard::EMPTY;
 
     mark_jump_relevant_squares(pos, pos, &mut relevant);
     for mv in baseline {
         let hypothetical = crate::legal::apply_move_only(pos, mv);
         mark_jump_relevant_squares(&hypothetical, pos, &mut relevant);
     }
-    relevant.retain(|&sq| !is_square_jump_active(pos, sq));
-    relevant.into_iter().collect()
+    relevant.minus(jump_bb(pos)).iter().collect()
 }
 
 /// A freeze cast only changes anything if its 3x3 zone touches a square that's
@@ -223,32 +219,23 @@ pub fn relevant_freeze_targets(pos: &Position, color: Color, baseline: &[PieceMo
     if !pos.spells(color).freeze.castable() {
         return Vec::new();
     }
-    let mut landing: BTreeSet<Square> = BTreeSet::new();
-    for i in 0..64u8 {
-        let sq = Square(i);
-        if pos.board.get(sq).is_some() {
-            landing.insert(sq);
-        }
-    }
+    let mut landing = pos.board.occupancy();
     for mv in baseline {
-        landing.insert(mv.to);
+        landing = landing.with(mv.to);
         if mv.is_castle {
             let rank = mv.from.rank();
             let rook_to = if mv.to.file() == 6 { Square::new(5, rank) } else { Square::new(3, rank) };
-            landing.insert(rook_to);
+            landing = landing.with(rook_to);
         }
     }
 
-    let mut relevant: BTreeSet<Square> = BTreeSet::new();
-    for sq in landing {
-        for z in freeze_zone(sq) {
-            relevant.insert(z);
-        }
+    let mut relevant = Bitboard::EMPTY;
+    for sq in landing.iter() {
+        relevant = relevant.union(FREEZE_ZONE[sq.0 as usize]);
     }
     // A square already anchoring a live freeze field is never a legal target (see
     // rules/30-freeze.md), regardless of zone geometry.
-    relevant.retain(|&sq| !is_field_anchor(pos, sq, SpellKind::Freeze));
-    relevant.into_iter().collect()
+    relevant.iter().filter(|&sq| !is_field_anchor(pos, sq, SpellKind::Freeze)).collect()
 }
 
 #[cfg(test)]
