@@ -17,6 +17,21 @@ const MAX_QUIESCENCE_DEPTH: u32 = 2;
 const ASPIRATION: i32 = 24;
 const KILLER_PLY_SLACK: u32 = 32;
 
+/// Score for a forced win/loss, offset by ply-from-root so a faster mate always
+/// beats a slower one. Comfortably above any real material/positional eval
+/// (max `piece_value` is 20_000, for MVV-LVA ordering only -- `evaluate` never
+/// sums a king) and far below `i32::MAX`, so negating it or adding a ply count
+/// never overflows.
+const MATE: i32 = 100_000;
+
+/// The side to move has just lost -- king captured, or checkmated with no spell
+/// rescue -- at `ply` plies from the root. Losing later scores better (closer to
+/// zero), so the search prefers to delay an inevitable loss over walking into a
+/// faster one.
+fn loss_at(ply: u32) -> i32 {
+    -MATE + ply as i32
+}
+
 struct SearchState<'a> {
     tt: &'a mut TranspositionTable,
     deadline: Option<Instant>,
@@ -163,9 +178,13 @@ fn search_children(
     Some(false)
 }
 
-pub fn negamax(pos: &Position, depth: u32) -> i32 {
+/// `ply` is this position's distance from whatever the caller considers the true
+/// search root -- pass `0` when `pos` genuinely is the root, or the ply already
+/// spent reaching it (e.g. `best_turn` plays one ply itself before calling this,
+/// so it passes `1`) so mate scores stay offset consistently with `search()`.
+pub fn negamax(pos: &Position, depth: u32, ply: u32) -> i32 {
     let mut tt = TranspositionTable::new();
-    let mut killers = KillerTable::new(depth + KILLER_PLY_SLACK);
+    let mut killers = KillerTable::new(depth + ply + KILLER_PLY_SLACK);
     let mut history = HistoryTable::new();
     let mut state = SearchState {
         tt: &mut tt,
@@ -179,7 +198,7 @@ pub fn negamax(pos: &Position, depth: u32) -> i32 {
         nmp_cutoffs: 0,
         no_spell_cutoffs: 0,
     };
-    alphabeta(pos, depth, i32::MIN + 1, i32::MAX - 1, 0, &mut state)
+    alphabeta(pos, depth, i32::MIN + 1, i32::MAX - 1, ply, &mut state)
         .expect("alphabeta with no deadline (None) never aborts")
 }
 
@@ -203,7 +222,7 @@ fn alphabeta(
     // before the (comparatively expensive) TT hash so this fast path stays fast.
     let king_sq = match pos.board.king_square(pos.side_to_move) {
         Some(sq) => sq,
-        None => return Some(i32::MIN + 1), // loss for the side to move
+        None => return Some(loss_at(ply)), // loss for the side to move
     };
 
     let is_pv = is_pv_window(alpha, beta);
@@ -236,14 +255,14 @@ fn alphabeta(
             let turns = generate_search_turns(pos);
             if turns.is_empty() {
                 return Some(if in_check {
-                    i32::MIN + 1
+                    loss_at(ply)
                 } else {
                     0
                 });
             }
         }
         let qturns = generate_quiescence_turns_from(pos, &baseline);
-        return quiescence(pos, alpha, beta, MAX_QUIESCENCE_DEPTH, state, qturns);
+        return quiescence(pos, alpha, beta, MAX_QUIESCENCE_DEPTH, ply, state, qturns);
     }
 
     let static_eval = evaluate(pos);
@@ -254,7 +273,7 @@ fn alphabeta(
         let margin = 250 + 150 * depth as i32;
         if static_eval.saturating_add(margin) < alpha {
             let baseline = legal_moves(pos);
-            if let Some(q) = quiescence(pos, alpha, beta, MAX_QUIESCENCE_DEPTH, state, generate_quiescence_turns_from(pos, &baseline)) {
+            if let Some(q) = quiescence(pos, alpha, beta, MAX_QUIESCENCE_DEPTH, ply, state, generate_quiescence_turns_from(pos, &baseline)) {
                 if q < alpha {
                     return Some(q);
                 }
@@ -286,17 +305,12 @@ fn alphabeta(
     let baseline = legal_moves(pos);
     let no_spell = no_spell_turns(&baseline);
     let no_spell_empty = no_spell.is_empty();
-    let terminal = || {
-        if in_check {
-            i32::MIN + 1
-        } else {
-            0
-        }
-    };
+    let terminal = || if in_check { loss_at(ply) } else { 0 };
 
     let tt_move = tt_entry.and_then(|e| e.best_move);
-    // Below every reachable score, including the "king already gone" loss of
-    // i32::MIN + 1, so the first searched move always records a best_turn.
+    // Below every reachable score, including the deepest possible "king already
+    // gone" loss (loss_at(0) = -MATE), so the first searched move always
+    // records a best_turn.
     let mut best = i32::MIN;
     let mut best_turn: Option<Turn> = None;
     let original_alpha = alpha;
@@ -381,6 +395,7 @@ fn quiescence(
     mut alpha: i32,
     beta: i32,
     qdepth: u32,
+    ply: u32,
     state: &mut SearchState<'_>,
     turns: Vec<Turn>,
 ) -> Option<i32> {
@@ -389,7 +404,7 @@ fn quiescence(
         return None;
     }
     if pos.board.king_square(pos.side_to_move).is_none() {
-        return Some(i32::MIN + 1); // loss for the side to move: its king is already gone
+        return Some(loss_at(ply)); // loss for the side to move: its king is already gone
     }
     let king_sq = pos.board.king_square(pos.side_to_move).unwrap();
     let in_check = spellchess_core::is_square_attacked(pos, king_sq, pos.side_to_move.opposite());
@@ -427,7 +442,7 @@ fn quiescence(
         }
         let next = apply_turn(pos, &turn);
         let next_turns = generate_quiescence_turns_from(&next, &legal_moves(&next));
-        let score = match quiescence(&next, -beta, -alpha, qdepth - 1, state, next_turns) {
+        let score = match quiescence(&next, -beta, -alpha, qdepth - 1, ply + 1, state, next_turns) {
             Some(s) => -s,
             None => return None,
         };
@@ -446,7 +461,7 @@ pub fn best_turn(pos: &Position, depth: u32) -> Option<(Turn, i32)> {
     let mut best: Option<(Turn, i32)> = None;
     for turn in turns {
         let next = apply_turn(pos, &turn);
-        let score = negamax(&next, depth.saturating_sub(1)).saturating_neg();
+        let score = negamax(&next, depth.saturating_sub(1), 1).saturating_neg();
         if best.map_or(true, |(_, b)| score > b) {
             best = Some((turn, score));
         }
@@ -567,6 +582,12 @@ pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
 mod tests {
     use super::*;
     use spellchess_core::{generate_turns, Board, Color, Piece, PieceKind, Position, Square};
+
+    /// Any `|score|` at or above this is a mate score, not a material/positional
+    /// one -- `MATE - 1_000` stays comfortably above the largest real eval swing.
+    fn is_mate_score(score: i32) -> bool {
+        score.abs() >= MATE - 1_000
+    }
 
     #[test]
     fn finds_back_rank_mate_in_one() {
@@ -759,7 +780,7 @@ mod tests {
     #[test]
     fn quiescence_sees_past_a_hanging_capture_at_the_horizon() {
         let pos = quiescence_test_position();
-        let score_with_quiescence = negamax(&pos, 1);
+        let score_with_quiescence = negamax(&pos, 1, 0);
         assert!(score_with_quiescence < 700, "got {score_with_quiescence}");
     }
 
@@ -817,7 +838,7 @@ mod tests {
         pos.black_spells = pos.white_spells;
 
         let (search_turn, search_score) = search(&pos, Budget::Depth(2)).expect("a move must be found");
-        let negamax_score = negamax(&pos, 1).saturating_neg(); // depth-1 from the reply side, mirroring best_turn's convention
+        let negamax_score = negamax(&pos, 1, 0).saturating_neg(); // depth-1 from the reply side, mirroring best_turn's convention
         let (best_turn_move, best_turn_score) = best_turn(&pos, 2).expect("a move must be found");
         assert_eq!(search_turn.mv, best_turn_move.mv, "search() and best_turn() must agree on the winning move");
         assert_eq!(search_score, best_turn_score, "search() and best_turn() must agree on the score");
@@ -876,6 +897,31 @@ mod tests {
         };
         pos.black_spells = pos.white_spells;
         let (_turn, score) = search(&pos, Budget::Depth(2)).expect("a legal pawn push exists");
-        assert!(score <= i32::MIN + 100, "forced mate must score as a loss, got {score}");
+        assert!(is_mate_score(score), "forced mate must score as a mate, got {score}");
+        assert!(score < 0, "White is losing, the score must be negative, got {score}");
+    }
+
+    #[test]
+    fn loss_at_prefers_a_later_ply_over_an_earlier_one() {
+        // A loss discovered further from the root scores better (closer to zero)
+        // than one discovered right away -- the search should prefer to delay an
+        // inevitable loss rather than walk into a faster one, since a deeper loss
+        // gives the opponent more chances to err along the way.
+        assert!(loss_at(5) > loss_at(1), "loss_at(5)={} must beat loss_at(1)={}", loss_at(5), loss_at(1));
+    }
+
+    #[test]
+    fn mate_scores_are_distinguished_from_material_eval() {
+        assert!(is_mate_score(loss_at(3)), "a loss must be recognised as a mate score");
+        assert!(is_mate_score(-loss_at(3)), "the winning side's mirrored score must also be recognised");
+        assert!(!is_mate_score(900), "a real material eval (e.g. up a queen) must not be mistaken for a mate score");
+    }
+
+    #[test]
+    fn a_forced_mate_found_deeper_scores_closer_to_zero_than_one_found_at_the_root() {
+        // Ply-adjustment is only meaningful if two mates at different distances from
+        // the root actually produce different scores. Before this feature, every
+        // loss shared the exact same flat sentinel regardless of how deep it was.
+        assert_ne!(loss_at(1), loss_at(3), "mates at different plies must not collapse to the same score");
     }
 }
