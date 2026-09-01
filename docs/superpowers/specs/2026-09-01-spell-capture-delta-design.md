@@ -75,6 +75,11 @@ handled cheaply by `move_survives_own_freeze` and is out of scope here.
 - **No search-algorithm changes.** TT, killers, history, ordering, pruning, quiescence
   depth and the `full_spells` gating in `search.rs:373` all stay exactly as they are.
   This pass changes only how a turn list is computed, never which turns are searched.
+  In particular the tree is *deliberately* wide: the root always pairs the full
+  freeze/jump set (needed for freeze-then-take at the root) and quiescence's freeze
+  branch is no longer gated behind check/pin (needed for freeze-the-recapturer). Both
+  came from `b8a262d`'s correctness fixes. Narrowing either is a tactic-visibility
+  regression, not an optimisation.
 - **No Lazy-SMP / multithreading.** Separately scoped; deliberately deferred until the
   single-thread node cost is fixed, since the two compound and parallelism would
   otherwise lock in the current per-node cost. `Position` is `Copy` with no heap
@@ -212,12 +217,23 @@ ray-extension and freeze-mechanism helpers are the reusable parts, and a future
 `moves_under_field` entry point can layer removals on top of the same internals. That
 is a follow-up, explicitly not this pass.
 
-One independent fix is folded in here, since it is in the rewritten function anyway:
-`generate_quiescence_from:584` iterates the
-**exhaustive** `jump_targets` (every occupied square — up to 32 in the opening) even
-though `relevant_jump_targets` exists, is a proven strict subset, and is already used
-elsewhere. There is a test asserting the subset relation
-(`relevant_jump_targets_is_a_subset_of_jump_targets`), so this is a safe swap.
+### Do not "fix" the exhaustive jump target list
+
+`generate_quiescence_from:584` iterates the **exhaustive** `jump_targets` rather than
+the relevance-filtered `relevant_jump_targets`, which looks like an obvious free win —
+the latter is a proven strict subset, with a test asserting it
+(`relevant_jump_targets_is_a_subset_of_jump_targets`).
+
+**It is a known dead end. It was tried on 2026-08-22 and reverted: 13.4s → 18.0s at
+depth 6, reproduced twice.** `relevant_jump_targets` runs `apply_move_only` plus a
+relevance scan per baseline move (`spells.rs:207-210`), which costs more upfront than
+it saves when called once per quiescence *entry* rather than once per recursive node.
+The "relevance-filtered is always cheaper" intuition from the main search generator
+does not transfer to entry-only call sites.
+
+The delta rewrite makes this moot: it removes the per-target rescan that made the
+target-list length matter in the first place. Do not reintroduce the swap without
+fresh measurement.
 
 ## Testing
 
@@ -244,6 +260,12 @@ Ordered strongest-first; the first two are what make this safe.
    false by roughly two orders of magnitude since `55b3f3e`. Replace its bounds with
    measured post-change numbers plus headroom, and say in the doc comment what machine
    produced them.
+
+**Landing requirement.** Any change to `generate_quiescence_from` /
+`generate_quiescence_turns_from` must be re-run against the release ignored test
+(`cargo test -p spellchess-search --release -- --ignored`) *before* landing. The item-9
+quiescence regression sat unnoticed on `main` for a full commit specifically because
+that step was skipped.
 
 ## Measurement
 
