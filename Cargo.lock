@@ -95,6 +95,7 @@ dependencies = [
 name = "spellchess-search"
 version = "0.1.0"
 dependencies = [
+ "spellchess-cli",
  "spellchess-core",
 ]
 
