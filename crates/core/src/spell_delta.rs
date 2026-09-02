@@ -224,11 +224,20 @@ fn freeze_captures(
     let slider_occ = occ.minus(jump);
 
     let checkers_before = crate::attacks::attackers_to(pos, king_sq, enemy, frozen_before, slider_occ);
-    let checkers_after = crate::attacks::attackers_to(pos, king_sq, enemy, frozen_after, slider_occ);
-    if !checkers_before.is_empty() || !checkers_after.is_empty() {
+    if !checkers_before.is_empty() {
         // Check dispelled (or still live): the newly legal set is essentially the
         // whole position, which is not a cheap delta. This is what the escape
         // hatch exists for.
+        //
+        // Testing `checkers_before` alone is exhaustive; there is deliberately no
+        // `checkers_after` term. A freeze can never *add* a checker: `attackers_to`
+        // is monotonically decreasing in `frozen` (attacks.rs walks `unfrozen()`),
+        // `frozen_after` is a superset of `frozen_before`, and a freeze leaves
+        // occupancy -- and therefore `slider_occ` -- untouched. So `checkers_after`
+        // is always a subset of `checkers_before`, and the disjunct it would
+        // contribute can never decide this branch. It used to be spelled out here and
+        // cost a full `attackers_to` per freeze target per leaf on the hottest path.
+        // Anyone who makes freeze touch occupancy or jump fields must revisit this.
         return Delta::NeedsRescan;
     }
 
