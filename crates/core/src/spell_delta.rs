@@ -475,16 +475,50 @@ mod tests {
         delta
     }
 
+    /// The `out.truncate(start_len)` discipline only matters on a decline that happens
+    /// *after* candidates were already pushed, and only one path reaches that: the
+    /// released-pin loop walks `released` in ascending square order, so a non-pawn
+    /// released below a released pawn emits its captures before the pawn forces the
+    /// decline. This fixture builds exactly that.
     #[test]
-    fn declining_leaves_the_output_buffer_untouched() {
-        let pos = Position::starting();
+    fn declining_after_pushing_candidates_restores_the_output_buffer() {
+        // White Re5 is pinned to Ke4 by Re7 up the e-file; White Pf5 is pinned by Bg6
+        // up the diagonal. freeze@f7 covers e7 AND g6, so both pins die at once and
+        // `released` is {e5, f5}. e5 < f5, so the rook pushes Re5xa5 as a candidate
+        // and *then* the pawn -- whose captures carry promotion and en-passant
+        // variants this path does not model -- forces `NeedsRescan`.
+        let mut pos = empty_board();
+        put(&mut pos, "e4", Color::White, PieceKind::King);
+        put(&mut pos, "e5", Color::White, PieceKind::Rook);
+        put(&mut pos, "f5", Color::White, PieceKind::Pawn);
+        put(&mut pos, "e7", Color::Black, PieceKind::Rook);
+        put(&mut pos, "g6", Color::Black, PieceKind::Bishop);
+        put(&mut pos, "a5", Color::Black, PieceKind::Rook);
+        put(&mut pos, "a8", Color::Black, PieceKind::King);
+
         let baseline = legal_moves(&pos);
-        let cast = SpellCast { kind: SpellKind::Freeze, square: Square::from_str("d4").unwrap() };
-        let mut out = vec![baseline[0]];
-        let before = out.clone();
-        if captures_enabled_by(&pos, cast, &baseline, &mut out) == Delta::NeedsRescan {
-            assert_eq!(out, before, "a declining call must not touch `out`");
-        }
+        // Off the pin ray, so it is the freeze that legalises it -- Re5xe7 (the pinner
+        // itself) was always legal and is filtered out by `in_baseline`.
+        let rxa5 = PieceMove::quiet(sq("e5"), sq("a5"));
+        assert!(!baseline.contains(&rxa5), "fixture is wrong: Re5xa5 must start pinned-illegal");
+        let cast = SpellCast { kind: SpellKind::Freeze, square: sq("f7") };
+        assert!(
+            rescan_oracle(&pos, cast, &baseline).contains(&rxa5),
+            "fixture is wrong: freeze@f7 must enable Re5xa5",
+        );
+
+        // White box, so this test cannot silently go vacuous again: the inner
+        // mechanism really does leave a candidate behind when it declines.
+        let mut raw = Vec::new();
+        assert_eq!(freeze_captures(&pos, sq("f7"), &baseline, &mut raw), Delta::NeedsRescan);
+        assert_eq!(raw, vec![rxa5], "fixture is wrong: the decline must follow a push");
+
+        // ...and the public entry point hands the caller its buffer back untouched.
+        let sentinel: Vec<PieceMove> = baseline.iter().take(2).copied().collect();
+        assert!(!sentinel.is_empty(), "fixture is wrong: need a non-empty prior buffer");
+        let mut out = sentinel.clone();
+        assert_eq!(captures_enabled_by(&pos, cast, &baseline, &mut out), Delta::NeedsRescan);
+        assert_eq!(out, sentinel, "a declining call must restore `out` to its prior contents");
     }
 
     #[test]
