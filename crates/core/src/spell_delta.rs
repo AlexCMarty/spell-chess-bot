@@ -195,6 +195,10 @@ fn freeze_captures(
     let Some(king_sq) = pos.board.king_square(us) else {
         return Delta::NeedsRescan;
     };
+    // See the sort just before the final `Delta::Complete`: this call's own slice of
+    // `out` has to come out in `pseudo_legal_moves` order, and it is built in two
+    // passes that do not interleave.
+    let out_start = out.len();
 
     let frozen_before = crate::spells::frozen_bb(pos);
     let zone = crate::spells::FREEZE_ZONE[s.0 as usize];
@@ -360,6 +364,33 @@ fn freeze_captures(
             }
         }
     }
+
+    // The delta has to reproduce the rescan's *sequence*, not just its set:
+    // `generate_quiescence_from` pushes these in emission order and neither
+    // `dedup_captures` nor the quiescence loop sorts, so a different order is a
+    // different beta-cutoff order and a different qnode count.
+    //
+    // `pseudo_legal_moves` walks `own.minus(frozen)` in ascending square order and
+    // emits each piece's destinations ascending too (bitboard iteration; castles come
+    // first but are never captures), and `legal_moves` only filters, so the rescan is
+    // strictly ascending by `(from, to)`. The two mechanisms above are not: mechanism
+    // 2 emits ascending over `released`, then mechanism 3 appends the king's captures
+    // last regardless of where the king sits. Sorting this call's own slice -- never
+    // anything a caller already had in `out` -- restores the rescan's order.
+    //
+    // Sorting unconditionally, rather than only when both blocks are non-empty (each is
+    // already ascending on its own, so that is the only case that can be out of order),
+    // was measured: guarding it changes depth-6 wall time by nothing. The ~0.05s this
+    // costs is the monomorphised sort's code size in a hot function, not the call.
+    //
+    // The key is total here: ties on `(from, to)` would need promotions or en
+    // passant, and both paths into this function decline before emitting either (the
+    // pawn arm of the released loop, and the `pos.en_passant.is_some()` guard). The
+    // promotion component is carried anyway so the key stays faithful if that ever
+    // changes -- `Promotion::ALL` is declared in `as u8` order, which is exactly the
+    // order `add_pawn_move` emits.
+    out[out_start..]
+        .sort_unstable_by_key(|m| (m.from.0, m.to.0, m.promotion.map_or(0u8, |p| p as u8)));
 
     Delta::Complete
 }
