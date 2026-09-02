@@ -335,3 +335,321 @@ fn freeze_delta_matches_the_rescan_oracle() {
     let (complete, declined) = check_kind(SpellKind::Freeze);
     println!("freeze: {complete} complete, {declined} declined");
 }
+
+// ---------------------------------------------------------------------------
+// Emission ORDER.
+//
+// Everything above compares sorted multisets, which is not the whole contract.
+// `generate_quiescence_from` pushes the delta's moves into the turn list in
+// emission order, and neither `dedup_captures` nor the quiescence loop sorts
+// before consuming them -- so two answers with the same set but a different
+// sequence make the search try captures in a different order, changing
+// beta-cutoff order and qnode counts. The delta has to reproduce the rescan's
+// *sequence*.
+//
+// `pseudo_legal_moves` walks `own.minus(frozen)` in ascending square order and
+// emits each piece's destinations ascending (bitboard iteration), and
+// `legal_moves` only filters, so the rescan is strictly ascending by (from, to).
+// ---------------------------------------------------------------------------
+
+fn raw(moves: &[PieceMove]) -> Vec<(u8, u8, u8, bool, bool)> {
+    moves
+        .iter()
+        .map(|mv| (mv.from.0, mv.to.0, mv.promotion.map(|p| p as u8).unwrap_or(255), mv.is_en_passant, mv.is_castle))
+        .collect()
+}
+
+/// Like `check_kind_over`, but checks the set *and then* the order, so a set
+/// disagreement and an order disagreement fail with different messages.
+fn check_kind_over_ordered(kind: SpellKind, positions: &[Position]) -> (u32, u32) {
+    let (mut complete, mut declined) = (0u32, 0u32);
+    for pos in positions {
+        let us = pos.side_to_move;
+        let baseline = legal_moves(pos);
+        let targets = match kind {
+            SpellKind::Freeze => spells::freeze_targets(pos, us),
+            SpellKind::Jump => spells::jump_targets(pos, us),
+        };
+        for square in targets {
+            let cast = SpellCast { kind, square };
+            let mut fast = Vec::new();
+            match captures_enabled_by(pos, cast, &baseline, &mut fast) {
+                Delta::NeedsRescan => {
+                    declined += 1;
+                    assert!(fast.is_empty(), "a declining call must not touch `out`");
+                }
+                Delta::Complete => {
+                    complete += 1;
+                    let want = rescan_oracle(pos, cast, &baseline);
+                    assert_eq!(
+                        sorted(&fast),
+                        sorted(&want),
+                        "SET MISMATCH: delta disagreed with rescan for {cast:?} on {:?} fields {:?} stm {:?} ep {:?}",
+                        pos.board,
+                        pos.fields,
+                        pos.side_to_move,
+                        pos.en_passant,
+                    );
+                    assert_eq!(
+                        raw(&fast),
+                        raw(&want),
+                        "ORDER MISMATCH (the sets agree): delta emitted the same captures in a \
+                         different sequence than the rescan for {cast:?} on {:?} fields {:?} stm {:?} ep {:?}",
+                        pos.board,
+                        pos.fields,
+                        pos.side_to_move,
+                        pos.en_passant,
+                    );
+                }
+            }
+        }
+    }
+    (complete, declined)
+}
+
+/// The order contract, pinned deterministically rather than left to a random
+/// battery that hits this geometry about once in ten thousand positions.
+///
+/// White Ra3 is pinned to Ka1 by Ra6; Black Nb2 stands beside Ka1 defended only
+/// by Rb5. freeze@b6 covers a6 AND b5, so one cast fires both delta mechanisms:
+/// the released rook takes Bd3 (mechanism 2, from-square a3 = 16) and the king
+/// takes the now-undefended knight (mechanism 3, from-square a1 = 0). The
+/// mechanisms run in that order, but the rescan emits ascending by from-square,
+/// so the king's capture must come FIRST. Same set either way -- only the
+/// sequence tells the two apart, which is why the sorted comparisons above
+/// cannot see this.
+#[test]
+fn the_freeze_delta_emits_a_king_capture_before_a_higher_indexed_released_piece() {
+    let mut pos = Position { board: Board::empty(), ..Position::starting() };
+    pos.castle_rights =
+        CastleRights { white_kingside: false, white_queenside: false, black_kingside: false, black_queenside: false };
+    let sq = |s: &str| Square::from_str(s).unwrap();
+    let mut put = |s: &str, color: Color, kind: PieceKind| pos.board.set(sq(s), Some(Piece { color, kind }));
+    put("a1", Color::White, PieceKind::King);
+    put("a3", Color::White, PieceKind::Rook);
+    put("b2", Color::Black, PieceKind::Knight);
+    put("b5", Color::Black, PieceKind::Rook);
+    put("a6", Color::Black, PieceKind::Rook);
+    put("d3", Color::Black, PieceKind::Bishop);
+    put("h8", Color::Black, PieceKind::King);
+
+    let baseline = legal_moves(&pos);
+    let kxb2 = PieceMove::quiet(sq("a1"), sq("b2"));
+    let rxd3 = PieceMove::quiet(sq("a3"), sq("d3"));
+    assert!(!baseline.contains(&kxb2), "fixture is wrong: Rb5 must defend b2");
+    assert!(!baseline.contains(&rxd3), "fixture is wrong: Ra3 must be pinned");
+
+    let cast = SpellCast { kind: SpellKind::Freeze, square: sq("b6") };
+    let want = rescan_oracle(&pos, cast, &baseline);
+    assert_eq!(raw(&want), raw(&[kxb2, rxd3]), "fixture is wrong: the rescan must emit Kxb2 then Rxd3");
+
+    let mut fast = Vec::new();
+    assert_eq!(captures_enabled_by(&pos, cast, &baseline, &mut fast), Delta::Complete);
+    // The set check the batteries do -- passes even with the ordering bug present.
+    assert_eq!(sorted(&fast), sorted(&want), "SET MISMATCH");
+    // The check that actually catches it.
+    assert_eq!(raw(&fast), raw(&want), "ORDER MISMATCH (the sets agree)");
+}
+
+const DIRS: [(i8, i8); 8] = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)];
+const DENSE_KINDS: [PieceKind; 5] =
+    [PieceKind::Pawn, PieceKind::Knight, PieceKind::Bishop, PieceKind::Rook, PieceKind::Queen];
+
+/// Adds a live en-passant square when the geometry supports one. Neither battery
+/// above ever produces one, so the `pos.en_passant.is_some()` decline in
+/// `freeze_captures` and the en-passant arm of `legal_moves` went unexercised by
+/// the random sweeps.
+fn maybe_en_passant(pos: &mut Position, state: &mut u64) {
+    if splitmix64(state) % 4 != 0 {
+        return;
+    }
+    let (ep_rank, cap_rank) = if pos.side_to_move == Color::White { (5u8, 4u8) } else { (2u8, 3u8) };
+    let file = (splitmix64(state) % 8) as u8;
+    let ep = Square::new(file, ep_rank);
+    let cap = Square::new(file, cap_rank);
+    let victim = pos.board.get(cap);
+    if pos.board.get(ep).is_none()
+        && victim.is_some_and(|p| p.kind == PieceKind::Pawn && p.color != pos.side_to_move)
+    {
+        pos.en_passant = Some(ep);
+    }
+}
+
+/// Ray-dense: most pieces sit on rays radiating from the side-to-move's king, and
+/// jump fields are anchored on occupied squares, so pins, x-rays, ray growth and
+/// jump transparency are common rather than rare.
+fn ray_dense_positions(seed: u64, count: usize) -> Vec<Position> {
+    let mut state = seed;
+    let mut out = Vec::new();
+    while out.len() < count {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.castle_rights =
+            CastleRights { white_kingside: false, white_queenside: false, black_kingside: false, black_queenside: false };
+        let wk = Square((splitmix64(&mut state) % 64) as u8);
+        let bk = Square((splitmix64(&mut state) % 64) as u8);
+        if wk == bk {
+            continue;
+        }
+        pos.board.set(wk, Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(bk, Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.side_to_move = if splitmix64(&mut state) & 1 == 0 { Color::White } else { Color::Black };
+        let our_king = if pos.side_to_move == Color::White { wk } else { bk };
+
+        let mut occupied: Vec<Square> = vec![wk, bk];
+        // 3-9 pieces stacked along rays from our king.
+        for _ in 0..(3 + splitmix64(&mut state) % 7) {
+            let dir = DIRS[(splitmix64(&mut state) as usize) % 8];
+            let dist = 1 + (splitmix64(&mut state) % 7) as i8;
+            let f = our_king.file() as i8 + dir.0 * dist;
+            let r = our_king.rank() as i8 + dir.1 * dist;
+            if !(0..8).contains(&f) || !(0..8).contains(&r) {
+                continue;
+            }
+            let sq = Square::new(f as u8, r as u8);
+            if pos.board.get(sq).is_some() {
+                continue;
+            }
+            let kind = DENSE_KINDS[(splitmix64(&mut state) as usize) % 5];
+            let color = if splitmix64(&mut state) & 1 == 0 { Color::White } else { Color::Black };
+            if kind == PieceKind::Pawn && (sq.rank() == 0 || sq.rank() == 7) {
+                continue;
+            }
+            pos.board.set(sq, Some(Piece { color, kind }));
+            occupied.push(sq);
+        }
+        // 0-4 pieces anywhere.
+        for _ in 0..(splitmix64(&mut state) % 5) {
+            let sq = Square((splitmix64(&mut state) % 64) as u8);
+            if pos.board.get(sq).is_some() {
+                continue;
+            }
+            let kind = DENSE_KINDS[(splitmix64(&mut state) as usize) % 5];
+            let color = if splitmix64(&mut state) & 1 == 0 { Color::White } else { Color::Black };
+            if kind == PieceKind::Pawn && (sq.rank() == 0 || sq.rank() == 7) {
+                continue;
+            }
+            pos.board.set(sq, Some(Piece { color, kind }));
+            occupied.push(sq);
+        }
+        pos.ply = 8;
+        // 0-3 live fields; jumps land on occupied ray squares, so they are transparent
+        // to a slider that actually points at something.
+        for _ in 0..(splitmix64(&mut state) % 4) {
+            let jumpish = splitmix64(&mut state) % 3 != 0;
+            let kind = if jumpish { SpellKind::Jump } else { SpellKind::Freeze };
+            let square = if jumpish {
+                occupied[(splitmix64(&mut state) as usize) % occupied.len()]
+            } else {
+                Square((splitmix64(&mut state) % 64) as u8)
+            };
+            if pos.fields.iter().any(|f| f.kind == kind && f.square == square) {
+                continue;
+            }
+            if kind == SpellKind::Jump && pos.board.get(square).is_none() {
+                continue;
+            }
+            pos.fields.push(SpellField {
+                square,
+                owner: pos.side_to_move.opposite(),
+                kind,
+                expires_after_ply: pos.ply,
+            });
+        }
+        maybe_en_passant(&mut pos, &mut state);
+        out.push(pos);
+    }
+    out
+}
+
+/// Cramped: everything inside a 4x4..6x6 window, so every piece shares files,
+/// ranks and diagonals with several others. This is where "a slider gains a target
+/// off its own pin ray" and multi-pin geometries actually occur.
+fn cramped_positions(seed: u64, count: usize) -> Vec<Position> {
+    let mut state = seed;
+    let mut out = Vec::new();
+    while out.len() < count {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.castle_rights =
+            CastleRights { white_kingside: false, white_queenside: false, black_kingside: false, black_queenside: false };
+        let w = 4 + (splitmix64(&mut state) % 3) as u8;
+        let f0 = (splitmix64(&mut state) % (9 - w as u64)) as u8;
+        let r0 = (splitmix64(&mut state) % (9 - w as u64)) as u8;
+        let mut cells: Vec<Square> = Vec::new();
+        for df in 0..w {
+            for dr in 0..w {
+                cells.push(Square::new(f0 + df, r0 + dr));
+            }
+        }
+        let take = |state: &mut u64, free: &mut Vec<Square>| free.remove((splitmix64(state) as usize) % free.len());
+        let wk = take(&mut state, &mut cells);
+        let bk = take(&mut state, &mut cells);
+        pos.board.set(wk, Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(bk, Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        let mut occupied = vec![wk, bk];
+        for _ in 0..(4 + (splitmix64(&mut state) as usize) % 7) {
+            if cells.is_empty() {
+                break;
+            }
+            let sq = take(&mut state, &mut cells);
+            let kind = DENSE_KINDS[(splitmix64(&mut state) as usize) % 5];
+            let color = if splitmix64(&mut state) & 1 == 0 { Color::White } else { Color::Black };
+            if kind == PieceKind::Pawn && (sq.rank() == 0 || sq.rank() == 7) {
+                continue;
+            }
+            pos.board.set(sq, Some(Piece { color, kind }));
+            occupied.push(sq);
+        }
+        pos.side_to_move = if splitmix64(&mut state) & 1 == 0 { Color::White } else { Color::Black };
+        pos.ply = 8;
+        // Every field lands on an occupied square here -- in a cramped board that is
+        // also the only way a jump field is ever legal.
+        for _ in 0..(splitmix64(&mut state) % 4) {
+            let kind = if splitmix64(&mut state) % 3 != 0 { SpellKind::Jump } else { SpellKind::Freeze };
+            let square = occupied[(splitmix64(&mut state) as usize) % occupied.len()];
+            if pos.fields.iter().any(|f| f.kind == kind && f.square == square) {
+                continue;
+            }
+            pos.fields.push(SpellField {
+                square,
+                owner: pos.side_to_move.opposite(),
+                kind,
+                expires_after_ply: pos.ply,
+            });
+        }
+        maybe_en_passant(&mut pos, &mut state);
+        out.push(pos);
+    }
+    out
+}
+
+#[test]
+fn freeze_delta_matches_the_rescan_oracle_on_cramped_positions() {
+    let positions = cramped_positions(0xD1B54A32D192ED03, 250);
+    let (complete, declined) = check_kind_over_ordered(SpellKind::Freeze, &positions);
+    println!("freeze (cramped): {complete} complete, {declined} declined");
+    assert!(complete > 0, "freeze delta never returned Complete on the cramped battery");
+}
+
+#[test]
+fn jump_delta_matches_the_rescan_oracle_on_cramped_positions() {
+    let positions = cramped_positions(0x2545F4914F6CDD1D, 250);
+    let (complete, declined) = check_kind_over_ordered(SpellKind::Jump, &positions);
+    println!("jump (cramped): {complete} complete, {declined} declined");
+    assert!(complete > 0, "jump delta never returned Complete on the cramped battery");
+}
+
+#[test]
+fn freeze_delta_matches_the_rescan_oracle_on_ray_dense_positions() {
+    let positions = ray_dense_positions(0x9E3779B97F4A7C15, 250);
+    let (complete, declined) = check_kind_over_ordered(SpellKind::Freeze, &positions);
+    println!("freeze (ray dense): {complete} complete, {declined} declined");
+    assert!(complete > 0, "freeze delta never returned Complete on the ray-dense battery");
+}
+
+#[test]
+fn jump_delta_matches_the_rescan_oracle_on_ray_dense_positions() {
+    let positions = ray_dense_positions(0xBF58476D1CE4E5B9, 250);
+    let (complete, declined) = check_kind_over_ordered(SpellKind::Jump, &positions);
+    println!("jump (ray dense): {complete} complete, {declined} declined");
+    assert!(complete > 0, "jump delta never returned Complete on the ray-dense battery");
+}
