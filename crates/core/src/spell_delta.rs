@@ -63,6 +63,85 @@ fn slider_scan(board: &Board, us: Color, frozen: Bitboard, slider_occ: Bitboard)
     scan
 }
 
+/// Squares whose jump could add a new attacker on our king, precomputed once
+/// per node (see docs/superpowers/specs/2026-09-02-jump-exposure-precompute-
+/// and-fuzz-harness-design.md). Jump only grants slider transparency, so the
+/// only way it can add a checker is: `blocker` is the first REAL (non-
+/// transparent) piece on one of the king's 8 rook/bishop lines, and beyond it
+/// -- skipping over any square that already has a live jump field of its own,
+/// since those don't block either -- sits at least one matching, unfrozen
+/// enemy slider. `revealed` is every such square found along that line
+/// (usually zero or one; more than one only when multiple pre-existing jump
+/// fields are stacked on the same line). At most 8 entries: a square lies on
+/// at most one of the king's 8 lines.
+struct JumpExposure {
+    mask: Bitboard,
+    count: usize,
+    pairs: [(Square, Bitboard); 8],
+}
+
+impl JumpExposure {
+    const EMPTY: JumpExposure =
+        JumpExposure { mask: Bitboard::EMPTY, count: 0, pairs: [(Square(0), Bitboard::EMPTY); 8] };
+
+    /// The attacker(s) a jump on `s` would reveal (empty if none).
+    fn revealed_by(&self, s: Square) -> Bitboard {
+        self.pairs[..self.count]
+            .iter()
+            .find(|&&(blocker, _)| blocker == s)
+            .map(|&(_, r)| r)
+            .unwrap_or(Bitboard::EMPTY)
+    }
+}
+
+fn jump_exposure_scan(
+    board: &Board,
+    king_sq: Square,
+    enemy: Color,
+    frozen: Bitboard,
+    slider_occ: Bitboard,
+    jump: Bitboard,
+) -> JumpExposure {
+    let real_occ = board.occupancy();
+    let mut exp = JumpExposure::EMPTY;
+    for &dir in crate::rays::ROOK_DIRS.iter().chain(crate::rays::BISHOP_DIRS.iter()) {
+        let Some(blocker) =
+            crate::rays::ray_attacks(king_sq, slider_occ, dir).intersect(slider_occ).iter().next()
+        else {
+            continue;
+        };
+        let is_rook_dir = crate::rays::ROOK_DIRS.contains(&dir);
+        let mut revealed = Bitboard::EMPTY;
+        let mut from = blocker;
+        loop {
+            let Some(next) =
+                crate::rays::ray_attacks(from, real_occ, dir).intersect(real_occ).iter().next()
+            else {
+                break;
+            };
+            let piece = board.get(next).expect("real_occ square must be occupied");
+            let kind_matches = if is_rook_dir {
+                matches!(piece.kind, PieceKind::Rook | PieceKind::Queen)
+            } else {
+                matches!(piece.kind, PieceKind::Bishop | PieceKind::Queen)
+            };
+            if piece.color == enemy && !frozen.contains(next) && kind_matches {
+                revealed = revealed.with(next);
+            }
+            if !jump.contains(next) {
+                break;
+            }
+            from = next;
+        }
+        if !revealed.is_empty() {
+            exp.mask = exp.mask.with(blocker);
+            exp.pairs[exp.count] = (blocker, revealed);
+            exp.count += 1;
+        }
+    }
+    exp
+}
+
 /// Everything the delta needs that depends on the position but not on the cast.
 /// `generate_quiescence_from` builds one per node and hands it to every cast it
 /// tries. Before this existed each cast rebuilt all of it: a node with 30 freeze
@@ -89,6 +168,7 @@ pub(crate) struct NodeContext {
     /// Pins on our king under the current field -- `freeze_captures`' `pins_before`.
     pub(crate) pins: PinMap,
     sliders: SliderScan,
+    jump_exposure: JumpExposure,
 }
 
 impl NodeContext {
@@ -109,6 +189,10 @@ impl NodeContext {
                 PinMap { pinned: Bitboard::EMPTY, rays: [Bitboard::EMPTY; 64] },
             ),
         };
+        let jump_exposure = match king_sq {
+            Some(k) => jump_exposure_scan(&pos.board, k, enemy, frozen, slider_occ, jump),
+            None => JumpExposure::EMPTY,
+        };
         NodeContext {
             us,
             enemy,
@@ -120,6 +204,7 @@ impl NodeContext {
             checkers,
             pins,
             sliders: slider_scan(&pos.board, us, frozen, slider_occ),
+            jump_exposure,
         }
     }
 }
@@ -210,9 +295,13 @@ fn jump_captures(
     // previously live jump square subtracted, so `s` is the only one left to remove.
     let slider_occ_after = ctx.slider_occ.without(s);
 
-    // Jump is symmetric: it can open an enemy slider onto our own king. Recompute
-    // our king's check/pin context under the field rather than assuming it holds.
-    let checkers_after = attackers_to(pos, king_sq, ctx.enemy, ctx.frozen, slider_occ_after);
+    // Jump is symmetric: it can open an enemy slider onto our own king.
+    // `ctx.jump_exposure` was precomputed once for the whole node (see
+    // `jump_exposure_scan`) instead of walking `attackers_to` fresh for every
+    // target: checkers_after is provably `ctx.checkers` unchanged unless `s`
+    // is one of the (at most 8) squares that precompute recorded, and
+    // `revealed_by` returns an empty Bitboard (a no-op union) when it isn't.
+    let checkers_after = ctx.checkers.union(ctx.jump_exposure.revealed_by(s));
     if checkers_after.count() > 1 {
         // Double check: only king moves are legal, and a king move is never one of
         // the slider captures below. Decline rather than reason about it.
@@ -1239,5 +1328,79 @@ mod tests {
             "fixture is wrong: with nothing behind d4, Bxf6 must stay legal",
         );
         assert_delta_sound(&pos, cast);
+    }
+
+    /// Direct check of the precompute itself, reusing the rook-line fixture's
+    /// geometry: d4 must be recorded as exposing d8, and no other square on
+    /// the board should be recorded as exposing anything.
+    #[test]
+    fn jump_exposure_scan_finds_exactly_the_blocker_and_its_revealed_attacker() {
+        let mut pos = empty_board();
+        put(&mut pos, "d1", Color::White, PieceKind::King);
+        put(&mut pos, "d4", Color::Black, PieceKind::Knight);
+        put(&mut pos, "d8", Color::Black, PieceKind::Rook);
+        put(&mut pos, "h8", Color::Black, PieceKind::King);
+
+        let ctx = NodeContext::new(&pos);
+        assert_eq!(ctx.jump_exposure.revealed_by(sq("d4")), Bitboard::from_square(sq("d8")));
+        assert_eq!(ctx.jump_exposure.mask.count(), 1, "only d4 should be recorded as exposed");
+    }
+
+    /// A pre-existing jump field on the REVEALED square itself: jumping g3
+    /// (Black's own queen) opens the g-file toward White's rook on g5 -- but
+    /// g5 already has its own live jump field, so it does not block anything
+    /// and must still count as an attacker once revealed. Combined with a
+    /// pre-existing checker (White's knight on h4, unrelated to any spell),
+    /// jump@g3 must decline as a double check. This reproduces a real bug an
+    /// earlier version of `jump_exposure_scan` had: it used `slider_occ`
+    /// (which excludes g5, since g5 is already transparent) both to walk the
+    /// ray *and* to test "is a piece here," so it was blind to any piece
+    /// standing on an already-transparent square -- see the ruling in this
+    /// plan's Task 2 for the fix.
+    #[test]
+    fn jump_exposure_sees_past_an_already_transparent_revealed_piece() {
+        let mut pos = empty_board();
+        put(&mut pos, "g2", Color::Black, PieceKind::King);
+        put(&mut pos, "g3", Color::Black, PieceKind::Queen);
+        put(&mut pos, "h4", Color::White, PieceKind::Knight);
+        put(&mut pos, "g5", Color::White, PieceKind::Rook);
+        put(&mut pos, "e1", Color::White, PieceKind::King);
+        pos.side_to_move = Color::Black;
+        add_field(&mut pos, "g5", Color::White, SpellKind::Jump);
+
+        let ctx = NodeContext::new(&pos);
+        assert_eq!(
+            ctx.jump_exposure.revealed_by(sq("g3")),
+            Bitboard::from_square(sq("g5")),
+            "fixture is wrong: g5's rook must be found even though its own square is transparent",
+        );
+
+        let cast = SpellCast { kind: SpellKind::Jump, square: sq("g3") };
+        let hypothetical = crate::legal::position_with_field(&pos, cast);
+        let hyp_moves = legal_moves(&hypothetical);
+        // Double check (Nh4 + Rg5) restricts Black to king moves -- plus the one
+        // carve-out that survives any check, including double check: capturing the
+        // enemy king outright (rules/README.md, "the king can be captured, and it
+        // wins"). g3-f2-e1 is a clear diagonal here, so Qxe1 is also legal; this
+        // fixture's point is that nothing *else* (no interposition, no other capture)
+        // is legal, which is what actually distinguishes single from double check.
+        assert!(
+            !hyp_moves.is_empty()
+                && hyp_moves.iter().all(|mv| {
+                    mv.from == sq("g2")
+                        || pos.board.get(mv.to).is_some_and(|p| p.kind == PieceKind::King)
+                }),
+            "fixture is wrong: jump@g3 must leave only king moves and/or capturing the enemy king \
+             (double check from Nh4 and Rg5), got {hyp_moves:?}",
+        );
+
+        let baseline = legal_moves(&pos);
+        let mut out = Vec::new();
+        assert_eq!(
+            captures_enabled_by(&pos, cast, &baseline, &mut out),
+            Delta::NeedsRescan,
+            "a jump that reveals a checker sitting on an already-transparent square must still decline",
+        );
+        assert!(out.is_empty(), "a declining call must not touch `out`");
     }
 }
