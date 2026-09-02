@@ -2,6 +2,12 @@
 //! spell-turn generation:
 //!   cargo run --release -p spellchess-search --example hotcost
 //! Debug builds are meaningless here -- always use --release.
+//!
+//! Every argument goes through `black_box` as well as every result. `black_box` on
+//! the result alone is not enough for the cheap pure functions: with thin LTO the
+//! optimiser can see that the inputs never change across iterations, hoist the whole
+//! call out of the timing loop and leave you timing an empty loop. Blinding the
+//! inputs is what forces the call to happen `iters` times.
 
 use std::hint::black_box;
 use std::time::Instant;
@@ -32,20 +38,20 @@ fn probe(name: &str, pos: &Position) {
     let enemy = pos.side_to_move.opposite();
     println!("(legal moves: {})", baseline.len());
 
-    bench("hash_position", 200_000, || hash_position(pos));
-    bench("evaluate", 200_000, || evaluate(pos));
-    bench("is_square_attacked(own king)", 200_000, || is_square_attacked(pos, king, enemy));
-    bench("pseudo_legal_moves", 50_000, || pseudo_legal_moves(pos));
-    bench("legal_moves", 50_000, || legal_moves(pos));
+    bench("hash_position", 200_000, || hash_position(black_box(pos)));
+    bench("evaluate", 200_000, || evaluate(black_box(pos)));
+    bench("is_square_attacked(own king)", 200_000, || is_square_attacked(black_box(pos), black_box(king), black_box(enemy)));
+    bench("pseudo_legal_moves", 50_000, || pseudo_legal_moves(black_box(pos)));
+    bench("legal_moves", 50_000, || legal_moves(black_box(pos)));
     bench("generate_quiescence_recapture_turns", 20_000, || {
-        generate_quiescence_recapture_turns(pos, &baseline)
+        generate_quiescence_recapture_turns(black_box(pos), black_box(&baseline))
     });
     bench("generate_quiescence_turns_from", 2_000, || {
-        generate_quiescence_turns_from(pos, &baseline)
+        generate_quiescence_turns_from(black_box(pos), black_box(&baseline))
     });
-    bench("generate_search_turns", 500, || generate_search_turns(pos));
+    bench("generate_search_turns", 500, || generate_search_turns(black_box(pos)));
     let turn = Turn { spell: None, mv: baseline[0] };
-    bench("apply_turn (no spell)", 200_000, || apply_turn(pos, &turn));
+    bench("apply_turn (no spell)", 200_000, || apply_turn(black_box(pos), black_box(&turn)));
 }
 
 fn main() {
