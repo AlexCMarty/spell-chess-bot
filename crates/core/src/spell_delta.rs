@@ -161,6 +161,13 @@ fn piece_capture_targets(pos: &Position, from: Square, slider_occ: Bitboard, ene
     let idx = from.0 as usize;
     let raw = match piece.kind {
         PieceKind::Knight => crate::rays::KNIGHT_ATTACKS[idx],
+        // The next two arms are unreachable from the one caller today (the
+        // released-pin loop in `freeze_captures`): a king is never its own pin
+        // blocker, and a released pawn makes that loop decline before it gets here.
+        // Kept rather than `unreachable!()` so a future caller passing an arbitrary
+        // square gets an answer instead of a panic -- but note the pawn arm is only
+        // *pseudo*-correct: it yields the capture squares and silently drops the four
+        // promotion variants, which a new caller would have to expand itself.
         PieceKind::King => crate::rays::KING_ATTACKS[idx],
         PieceKind::Pawn => crate::rays::PAWN_ATTACKS[piece.color.index()][idx],
         kind => slider_attacks(kind, from, slider_occ),
@@ -275,8 +282,11 @@ fn freeze_captures(
         // jump square stops pinning but stays transparent, so `pins_of` walks on to a
         // further slider. The blocker is still pinned -- so it never reaches
         // `released` -- yet its ray, and with it its legal captures, just got longer.
-        // (This arm also covers a piece pinned only *after* the cast, whose
-        // before-ray is empty.)
+        // (Ray *growth* is the only new-pin-ish case there is: a freeze can never
+        // create a pin. `is_pinner` requires `!frozen` (legal.rs) and the blocker walk
+        // ignores `frozen` entirely, so growing `frozen` only ever removes pinners --
+        // `pins_after.pinned` is a subset of `pins_before.pinned`, and a square pinned
+        // only *after* the cast does not exist.)
         //
         // This guard ("guard 4" in the Task 5 review) is provably dominated by the
         // pinned-piece-captures-onto-a-live-jump-square guard immediately below: a
