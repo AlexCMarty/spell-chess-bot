@@ -319,9 +319,24 @@ Add to `mod tests` in `crates/core/src/spell_delta.rs`, right after the 7 tests 
         let cast = SpellCast { kind: SpellKind::Jump, square: sq("g3") };
         let hypothetical = crate::legal::position_with_field(&pos, cast);
         let hyp_moves = legal_moves(&hypothetical);
+        // The g3-f2-e1 diagonal is open, so besides the king's own moves,
+        // Qg3xe1 (capturing White's king outright) is ALSO legal here: moving
+        // the queen off g3 doesn't add a new attacker on Black's own king --
+        // g3 was already transparent, so Rg5's check was already live before
+        // the queen moves -- so attackers_after == attackers_before == 2 <=
+        // max(2, 1), satisfying the king-capture rule. Double check therefore
+        // permits king moves and/or capturing the enemy king, never anything
+        // else (found and fixed during Task 2's own execution, 2026-09-02 --
+        // the coordinator's original fixture didn't check whether that
+        // diagonal happened to be open).
         assert!(
-            !hyp_moves.is_empty() && hyp_moves.iter().all(|mv| mv.from == sq("g2")),
-            "fixture is wrong: jump@g3 must leave only king moves (double check from Nh4 and Rg5), got {hyp_moves:?}",
+            !hyp_moves.is_empty()
+                && hyp_moves.iter().all(|mv| {
+                    mv.from == sq("g2")
+                        || pos.board.get(mv.to).is_some_and(|p| p.kind == PieceKind::King)
+                }),
+            "fixture is wrong: jump@g3 must leave only king moves and/or capturing the enemy king \
+             (double check from Nh4 and Rg5), got {hyp_moves:?}",
         );
 
         let baseline = legal_moves(&pos);
