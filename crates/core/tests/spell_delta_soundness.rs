@@ -98,7 +98,10 @@ fn check_kind(kind: SpellKind) -> (u32, u32) {
             let cast = SpellCast { kind, square };
             let mut fast = Vec::new();
             match captures_enabled_by(&pos, cast, &baseline, &mut fast) {
-                Delta::NeedsRescan => declined += 1,
+                Delta::NeedsRescan => {
+                    declined += 1;
+                    assert!(fast.is_empty(), "a declining call must not touch `out`");
+                }
                 Delta::Complete => {
                     complete += 1;
                     assert_eq!(

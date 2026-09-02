@@ -233,6 +233,18 @@ fn freeze_captures(
     // `after_count` -- so a king capture that was illegal can become legal. That
     // rule is the subtlest in the engine; don't duplicate it, just decline whenever
     // we have any pseudo-legal shot at the enemy king.
+    //
+    // This guard ("guard 3" in the Task 5 review) is provably dominated: a reviewer
+    // showed every case it declines is already caught downstream, by the
+    // pinned-piece-captures-onto-a-live-jump-square guard a few lines below plus the
+    // king-takes-king decline in the mechanism-3 king_targets loop further down. No
+    // mutation of this block is killed by any test, and a ~72k-position differential
+    // sweep against the oracle with this guard and the ray-growth guard below both
+    // deleted found zero disagreements. It is kept anyway, because it is the stated
+    // precondition for mechanism 2's emission comment ("never reaches the enemy king
+    // (the mechanism-4 guard above already declined)"): delete this and mechanism 2
+    // would emit enemy-king captures whose legality rests on reasoning no longer
+    // encoded anywhere in the code, true by luck rather than by construction.
     if let Some(their_king) = pos.board.king_square(enemy) {
         if !crate::attacks::attackers_to(pos, their_king, us, frozen_after, slider_occ).is_empty() {
             return Delta::NeedsRescan;
@@ -252,6 +264,16 @@ fn freeze_captures(
         // `released` -- yet its ray, and with it its legal captures, just got longer.
         // (This arm also covers a piece pinned only *after* the cast, whose
         // before-ray is empty.)
+        //
+        // This guard ("guard 4" in the Task 5 review) is provably dominated by the
+        // pinned-piece-captures-onto-a-live-jump-square guard immediately below: a
+        // reviewer showed every case where the ray grows is already caught there. No
+        // mutation of this `if` is killed by any test, and the same ~72k-position
+        // differential sweep that cleared guard 3 above found zero disagreements with
+        // both this guard and guard 3 deleted. Kept deliberately alongside guard 3 (see
+        // its comment) rather than deleted: the sweep is a soundness spot-check, not a
+        // proof, and the guard costs nothing to keep -- `pins_after.rays` is already
+        // computed for the jump-square check that follows.
         if pins_before.rays[p.0 as usize] != pins_after.rays[p.0 as usize] {
             return Delta::NeedsRescan;
         }
