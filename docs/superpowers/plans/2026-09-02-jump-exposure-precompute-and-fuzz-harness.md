@@ -260,11 +260,11 @@ EOF
 **Files:**
 - Modify: `crates/core/src/spell_delta.rs:64-125` (insert `JumpExposure` struct + `jump_exposure_scan` fn between `slider_scan` and `NodeContext`; extend `NodeContext` struct and `NodeContext::new`)
 - Modify: `crates/core/src/spell_delta.rs:213-216` (only the `attackers_to` call and the comment above it inside `jump_captures` — the rest of the function, including the double-check decline logic that follows, is unchanged)
-- Modify: `crates/core/src/spell_delta.rs` (add one white-box unit test to `mod tests`)
+- Modify: `crates/core/src/spell_delta.rs` (add two white-box unit tests to `mod tests`: the exposure-scan check, and a regression fixture for a stacked-transparency bug found and fixed during this task's own execution — see the ruling before the `JumpExposure` code block below)
 
 **Interfaces:**
-- Consumes: `crate::rays::{ray_attacks, ROOK_DIRS, BISHOP_DIRS}` (all already `pub` in `rays.rs`), `Bitboard::{EMPTY, with, contains, intersect, iter}`, `Board::get`.
-- Produces: `NodeContext.jump_exposure: JumpExposure` (private field, `mod tests` can still reach it via `use super::*`), `JumpExposure::revealed_by(&self, s: Square) -> Option<Square>` — Task 3's mutation testing targets the guards inside `jump_exposure_scan`.
+- Consumes: `crate::rays::{ray_attacks, ROOK_DIRS, BISHOP_DIRS}` (all already `pub` in `rays.rs`), `Bitboard::{EMPTY, with, contains, intersect, iter, union}`, `Board::{get, occupancy}`.
+- Produces: `NodeContext.jump_exposure: JumpExposure` (private field, `mod tests` can still reach it via `use super::*`), `JumpExposure::revealed_by(&self, s: Square) -> Bitboard` (empty when `s` isn't an exposure square — not `Option<Square>`, since a single blocker can reveal more than one attacker when jump fields are stacked) — Task 3's mutation testing targets the guards inside `jump_exposure_scan`.
 
 - [ ] **Step 1: Add the white-box unit test first (will not compile yet)**
 
@@ -283,8 +283,55 @@ Add to `mod tests` in `crates/core/src/spell_delta.rs`, right after the 7 tests 
         put(&mut pos, "h8", Color::Black, PieceKind::King);
 
         let ctx = NodeContext::new(&pos);
-        assert_eq!(ctx.jump_exposure.revealed_by(sq("d4")), Some(sq("d8")));
+        assert_eq!(ctx.jump_exposure.revealed_by(sq("d4")), Bitboard::from_square(sq("d8")));
         assert_eq!(ctx.jump_exposure.mask.count(), 1, "only d4 should be recorded as exposed");
+    }
+
+    /// A pre-existing jump field on the REVEALED square itself: jumping g3
+    /// (Black's own queen) opens the g-file toward White's rook on g5 -- but
+    /// g5 already has its own live jump field, so it does not block anything
+    /// and must still count as an attacker once revealed. Combined with a
+    /// pre-existing checker (White's knight on h4, unrelated to any spell),
+    /// jump@g3 must decline as a double check. This reproduces a real bug an
+    /// earlier version of `jump_exposure_scan` had: it used `slider_occ`
+    /// (which excludes g5, since g5 is already transparent) both to walk the
+    /// ray *and* to test "is a piece here," so it was blind to any piece
+    /// standing on an already-transparent square -- see the ruling in this
+    /// plan's Task 2 for the fix.
+    #[test]
+    fn jump_exposure_sees_past_an_already_transparent_revealed_piece() {
+        let mut pos = empty_board();
+        put(&mut pos, "g2", Color::Black, PieceKind::King);
+        put(&mut pos, "g3", Color::Black, PieceKind::Queen);
+        put(&mut pos, "h4", Color::White, PieceKind::Knight);
+        put(&mut pos, "g5", Color::White, PieceKind::Rook);
+        put(&mut pos, "e1", Color::White, PieceKind::King);
+        pos.side_to_move = Color::Black;
+        add_field(&mut pos, "g5", Color::White, SpellKind::Jump);
+
+        let ctx = NodeContext::new(&pos);
+        assert_eq!(
+            ctx.jump_exposure.revealed_by(sq("g3")),
+            Bitboard::from_square(sq("g5")),
+            "fixture is wrong: g5's rook must be found even though its own square is transparent",
+        );
+
+        let cast = SpellCast { kind: SpellKind::Jump, square: sq("g3") };
+        let hypothetical = crate::legal::position_with_field(&pos, cast);
+        let hyp_moves = legal_moves(&hypothetical);
+        assert!(
+            !hyp_moves.is_empty() && hyp_moves.iter().all(|mv| mv.from == sq("g2")),
+            "fixture is wrong: jump@g3 must leave only king moves (double check from Nh4 and Rg5), got {hyp_moves:?}",
+        );
+
+        let baseline = legal_moves(&pos);
+        let mut out = Vec::new();
+        assert_eq!(
+            captures_enabled_by(&pos, cast, &baseline, &mut out),
+            Delta::NeedsRescan,
+            "a jump that reveals a checker sitting on an already-transparent square must still decline",
+        );
+        assert!(out.is_empty(), "a declining call must not touch `out`");
     }
 ```
 
@@ -300,27 +347,52 @@ Expected: compile error, `no field \`jump_exposure\` on type \`&NodeContext\`` (
 
 Insert into `crates/core/src/spell_delta.rs` immediately after `slider_scan`'s closing `}` (currently ending at line 64) and before the `/// Everything the delta needs...` doc comment that precedes `NodeContext` (currently starting at line 66):
 
+**Ruling (recorded 2026-09-02 during Task 2 execution — see the SDD ledger):**
+the version below supersedes an earlier draft that used `slider_occ` to test
+"is a piece on this square" when looking for the revealed attacker. That is
+wrong: `slider_occ` excludes squares that are *already* jump-transparent from
+an earlier field, so a piece standing on one of those squares was invisible
+to the scan even though it still attacks from its own square (jump makes a
+square transparent *to other rays passing through it*; it does not erase the
+piece standing on it — see `attacks.rs`'s `slider_on_a_jump_square_still_attacks`
+test for the same principle applied to `attackers_to`). The fix separates
+"does this square block" (transparency-based) from "is there an attacker
+here" (real board occupancy) and walks *through* any already-transparent
+occupied square instead of stopping at it, checking each one along the way.
+This also means a single blocker can now reveal more than one attacker (only
+when multiple pre-existing jump fields are stacked on the same line, which is
+rare), so `JumpExposure` stores a `Bitboard` of revealed squares per blocker
+instead of a single `Square`.
+
 ```rust
 /// Squares whose jump could add a new attacker on our king, precomputed once
 /// per node (see docs/superpowers/specs/2026-09-02-jump-exposure-precompute-
 /// and-fuzz-harness-design.md). Jump only grants slider transparency, so the
-/// only way it can add a checker is: `blocker` is the first piece on one of
-/// the king's 8 rook/bishop lines, and the piece immediately behind it is a
-/// matching, unfrozen enemy slider -- `revealed`. At most 8 entries: a square
-/// lies on at most one of the king's 8 lines.
+/// only way it can add a checker is: `blocker` is the first REAL (non-
+/// transparent) piece on one of the king's 8 rook/bishop lines, and beyond it
+/// -- skipping over any square that already has a live jump field of its own,
+/// since those don't block either -- sits at least one matching, unfrozen
+/// enemy slider. `revealed` is every such square found along that line
+/// (usually zero or one; more than one only when multiple pre-existing jump
+/// fields are stacked on the same line). At most 8 entries: a square lies on
+/// at most one of the king's 8 lines.
 struct JumpExposure {
     mask: Bitboard,
     count: usize,
-    pairs: [(Square, Square); 8],
+    pairs: [(Square, Bitboard); 8],
 }
 
 impl JumpExposure {
     const EMPTY: JumpExposure =
-        JumpExposure { mask: Bitboard::EMPTY, count: 0, pairs: [(Square(0), Square(0)); 8] };
+        JumpExposure { mask: Bitboard::EMPTY, count: 0, pairs: [(Square(0), Bitboard::EMPTY); 8] };
 
-    /// The attacker a jump on `s` would reveal, if any.
-    fn revealed_by(&self, s: Square) -> Option<Square> {
-        self.pairs[..self.count].iter().find(|&&(blocker, _)| blocker == s).map(|&(_, r)| r)
+    /// The attacker(s) a jump on `s` would reveal (empty if none).
+    fn revealed_by(&self, s: Square) -> Bitboard {
+        self.pairs[..self.count]
+            .iter()
+            .find(|&&(blocker, _)| blocker == s)
+            .map(|&(_, r)| r)
+            .unwrap_or(Bitboard::EMPTY)
     }
 }
 
@@ -330,7 +402,9 @@ fn jump_exposure_scan(
     enemy: Color,
     frozen: Bitboard,
     slider_occ: Bitboard,
+    jump: Bitboard,
 ) -> JumpExposure {
+    let real_occ = board.occupancy();
     let mut exp = JumpExposure::EMPTY;
     for &dir in crate::rays::ROOK_DIRS.iter().chain(crate::rays::BISHOP_DIRS.iter()) {
         let Some(blocker) =
@@ -338,30 +412,34 @@ fn jump_exposure_scan(
         else {
             continue;
         };
-        let Some(revealed) =
-            crate::rays::ray_attacks(blocker, slider_occ, dir).intersect(slider_occ).iter().next()
-        else {
-            continue;
-        };
-        if frozen.contains(revealed) {
-            continue;
-        }
-        let Some(piece) = board.get(revealed) else { continue };
-        if piece.color != enemy {
-            continue;
-        }
         let is_rook_dir = crate::rays::ROOK_DIRS.contains(&dir);
-        let kind_matches = if is_rook_dir {
-            matches!(piece.kind, PieceKind::Rook | PieceKind::Queen)
-        } else {
-            matches!(piece.kind, PieceKind::Bishop | PieceKind::Queen)
-        };
-        if !kind_matches {
-            continue;
+        let mut revealed = Bitboard::EMPTY;
+        let mut from = blocker;
+        loop {
+            let Some(next) =
+                crate::rays::ray_attacks(from, real_occ, dir).intersect(real_occ).iter().next()
+            else {
+                break;
+            };
+            let piece = board.get(next).expect("real_occ square must be occupied");
+            let kind_matches = if is_rook_dir {
+                matches!(piece.kind, PieceKind::Rook | PieceKind::Queen)
+            } else {
+                matches!(piece.kind, PieceKind::Bishop | PieceKind::Queen)
+            };
+            if piece.color == enemy && !frozen.contains(next) && kind_matches {
+                revealed = revealed.with(next);
+            }
+            if !jump.contains(next) {
+                break;
+            }
+            from = next;
         }
-        exp.mask = exp.mask.with(blocker);
-        exp.pairs[exp.count] = (blocker, revealed);
-        exp.count += 1;
+        if !revealed.is_empty() {
+            exp.mask = exp.mask.with(blocker);
+            exp.pairs[exp.count] = (blocker, revealed);
+            exp.count += 1;
+        }
     }
     exp
 }
@@ -381,7 +459,7 @@ In `NodeContext::new` (currently lines 94-125), after the line `sliders: slider_
 
 ```rust
         let jump_exposure = match king_sq {
-            Some(k) => jump_exposure_scan(&pos.board, k, enemy, frozen, slider_occ),
+            Some(k) => jump_exposure_scan(&pos.board, k, enemy, frozen, slider_occ, jump),
             None => JumpExposure::EMPTY,
         };
         NodeContext {
@@ -417,11 +495,9 @@ with:
     // `ctx.jump_exposure` was precomputed once for the whole node (see
     // `jump_exposure_scan`) instead of walking `attackers_to` fresh for every
     // target: checkers_after is provably `ctx.checkers` unchanged unless `s`
-    // is one of the (at most 8) squares that precompute recorded.
-    let checkers_after = match ctx.jump_exposure.revealed_by(s) {
-        Some(revealed) => ctx.checkers.with(revealed),
-        None => ctx.checkers,
-    };
+    // is one of the (at most 8) squares that precompute recorded, and
+    // `revealed_by` returns an empty Bitboard (a no-op union) when it isn't.
+    let checkers_after = ctx.checkers.union(ctx.jump_exposure.revealed_by(s));
     if checkers_after.count() > 1 {
 ```
 
@@ -433,7 +509,8 @@ Leave the rest of the function (the double-check decline, the `sliders.reach` ea
 ~/.cargo/bin/cargo test -p spellchess-core --lib spell_delta::tests -- --no-fail-fast
 ```
 
-Expected: all tests PASS, including the new white-box test and all 7 fixtures from Task 1.
+Expected: all tests PASS, including the two new white-box tests, the stacked-transparency
+regression fixture, and all 7 fixtures from Task 1.
 
 - [ ] **Step 7: Run the full workspace test suite**
 
@@ -454,32 +531,45 @@ jump_captures called attackers_to fresh for every jump target just to
 check for a newly-created checker -- 7.22M calls at depth 6 alone. Jump
 only grants slider transparency, so the only way it can add a checker
 is a specific, boundable set of at-most-8 squares per node (first
-blocker on one of the king's 8 rays, with a matching unfrozen enemy
-slider behind it). Precompute that set once in NodeContext::new and
+blocker on one of the king's 8 rays, with at least one matching
+unfrozen enemy slider behind it -- walking through any square that is
+itself already jump-transparent from an earlier field, since those
+don't block either). Precompute that set once in NodeContext::new and
 reduce the per-target check to a bitboard lookup.
+
+Includes a regression fixture for a stacked-transparency bug caught by
+the existing spell_delta_soundness.rs battery during this task: a
+revealed attacker sitting on its own already-transparent square was
+invisible to an earlier version of the scan.
 EOF
 )"
 ```
 
 ---
 
-## Task 3: Mutation-test the three new guards in `jump_exposure_scan`
+## Task 3: Mutation-test the four new guards in `jump_exposure_scan`
 
 **Files:**
 - Modify (temporarily, one guard at a time, then revert): `crates/core/src/spell_delta.rs`
 
 **Interfaces:**
-- Consumes: the three guards added in Task 2 (`if frozen.contains(revealed) { continue; }`, `if piece.color != enemy { continue; }`, `if !kind_matches { continue; }`).
+- Consumes: the combined match condition added in Task 2
+  (`if piece.color == enemy && !frozen.contains(next) && kind_matches { revealed = revealed.with(next); }`)
+  and the walk-through-transparency guard (`if !jump.contains(next) { break; }`).
 - Produces: confidence that each guard is load-bearing, per the project's standing mutation-testing requirement for freeze/jump legality changes.
 
 - [ ] **Step 1: Mutate the frozen-check guard and confirm a named test dies**
 
-Temporarily comment out the guard:
+Temporarily change:
 
 ```rust
-        // if frozen.contains(revealed) {
-        //     continue;
-        // }
+            if piece.color == enemy && !frozen.contains(next) && kind_matches {
+```
+
+to:
+
+```rust
+            if piece.color == enemy && kind_matches {
 ```
 
 Run:
@@ -488,47 +578,53 @@ Run:
 ~/.cargo/bin/cargo test -p spellchess-core --lib spell_delta::tests -- --no-fail-fast 2>&1 | grep -A3 "FAILED\|test result"
 ```
 
-Expected: `a_frozen_revealed_piece_does_not_count_as_exposure` FAILS (and only that test, or that test plus others that happen to also exercise it — confirm the frozen fixture specifically is in the failure list). Revert the comment-out afterward.
+Expected: `a_frozen_revealed_piece_does_not_count_as_exposure` FAILS (and only that test, or that test plus others that happen to also exercise it — confirm the frozen fixture specifically is in the failure list). Revert afterward.
 
 - [ ] **Step 2: Mutate the color-check guard and confirm a named test dies**
 
-Temporarily change:
+Temporarily change the same line to:
 
 ```rust
-        if piece.color != enemy {
-```
-
-to:
-
-```rust
-        if false {
+            if !frozen.contains(next) && kind_matches {
 ```
 
 Run the same test command. Expected: `an_own_colored_revealed_piece_does_not_count_as_exposure` FAILS. Revert.
 
 - [ ] **Step 3: Mutate the kind-match guard and confirm a named test dies**
 
-Temporarily change:
+Temporarily change the same line to:
 
 ```rust
-        if !kind_matches {
+            if piece.color == enemy && !frozen.contains(next) {
+```
+
+Run the same test command. Expected: `jump_exposure_requires_the_revealed_piece_kind_to_match_the_ray` FAILS. Revert.
+
+- [ ] **Step 4: Mutate the walk-through-transparency guard and confirm a named test dies**
+
+This is the mechanism that fixes the stacked-transparency bug found during this task — it must be load-bearing too. Temporarily change:
+
+```rust
+            if !jump.contains(next) {
+                break;
+            }
 ```
 
 to:
 
 ```rust
-        if false {
+            break;
 ```
 
-Run the same test command. Expected: `jump_exposure_requires_the_revealed_piece_kind_to_match_the_ray` FAILS. Revert.
+Run the same test command. Expected: `jump_exposure_sees_past_an_already_transparent_revealed_piece` FAILS (it should find nothing at g3, or find the wrong thing, once the walk can never see past g5). Revert.
 
-- [ ] **Step 4: Confirm the file is back to the Task 2 committed state and all tests pass**
+- [ ] **Step 5: Confirm the file is back to the Task 2 committed state and all tests pass**
 
 ```bash
 git diff crates/core/src/spell_delta.rs
 ```
 
-Expected: empty diff (all three mutations reverted). Then:
+Expected: empty diff (all four mutations reverted). Then:
 
 ```bash
 ~/.cargo/bin/cargo test -p spellchess-core --lib spell_delta::tests -- --no-fail-fast
