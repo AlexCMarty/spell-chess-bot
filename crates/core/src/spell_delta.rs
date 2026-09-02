@@ -175,11 +175,15 @@ fn piece_capture_targets(pos: &Position, from: Square, slider_occ: Bitboard, ene
 /// can therefore only flip one of these:
 ///
 /// 1. the check filters (`checker_count >= 2`, `evasion_allows`) -- declined below;
-/// 2. the pin filter -- the released pins this function computes;
-/// 3. `king_dest_safe` for a piece standing beside our king -- declined below,
-///    Task 5's mechanism;
+/// 2. the pin filter -- the released pins this function computes. Inside that filter
+///    sits a clone-and-rescan arm for a pinned piece capturing onto a live jump
+///    square, which freeze can flip without touching the pin at all -- declined below;
+/// 3. `king_dest_safe` for an enemy piece standing beside our king -- computed below;
 /// 4. `after_count <= before_count.max(1)` for capturing the enemy king -- declined
 ///    below.
+///
+/// That list is the spec, and nothing links it mechanically to `legal_moves`: anyone
+/// adding a filter there must revisit it here.
 fn freeze_captures(
     pos: &Position,
     s: Square,
@@ -232,33 +236,6 @@ fn freeze_captures(
     if let Some(their_king) = pos.board.king_square(enemy) {
         if !crate::attacks::attackers_to(pos, their_king, us, frozen_after, slider_occ).is_empty() {
             return Delta::NeedsRescan;
-        }
-    }
-
-    // Mechanism 3. Freezing the last defender of an enemy piece standing beside our
-    // king lets the king take it -- no pin involved, so the loop below would miss
-    // it. Task 5 computes these; until then, decline. `king_dest_safe` clears both
-    // our king and the target before testing, so x-rays through either square count
-    // as defenders; mirror that here.
-    //
-    // Clearing `king_sq` from the probe is dead *today*: a slider whose ray to `t`
-    // runs through our king necessarily attacks the king first, so the check guard
-    // above would already have declined. It becomes load-bearing the moment that
-    // guard is relaxed -- which is exactly what Task 5 does when it replaces this
-    // decline with a real computation. Keep it.
-    if !frozen_after.contains(king_sq) {
-        for t in crate::rays::KING_ATTACKS[king_sq.0 as usize].intersect(enemy_bb).iter() {
-            if in_baseline(baseline, PieceMove::quiet(king_sq, t)) {
-                continue;
-            }
-            let mut probe = *pos;
-            probe.board.set(king_sq, None);
-            probe.board.set(t, None);
-            let probe_occ = probe.board.occupancy().minus(jump);
-            let defenders = crate::attacks::attackers_to(&probe, t, enemy, frozen_before, probe_occ);
-            if !defenders.intersect(newly_frozen_them).is_empty() {
-                return Delta::NeedsRescan;
-            }
         }
     }
 
@@ -319,6 +296,49 @@ fn freeze_captures(
             out.push(mv);
         }
     }
+
+    // Mechanism 3, the other one this function computes. A frozen piece exerts no
+    // control (rules/30-freeze.md), so freezing the last defender of an enemy piece
+    // standing beside our king lets the king take it -- no pin is involved, so the
+    // released loop above cannot see it.
+    //
+    // `legal_moves` filters a king move with exactly one test, `king_dest_safe`, and
+    // a king capture of an adjacent enemy piece is pseudo-legal whenever the king is
+    // unfrozen -- so evaluating that one predicate against the hypothetical (which
+    // carries the new freeze field, and which `king_dest_safe` itself probes by
+    // clearing both `king_sq` and the target) is the whole rule, not an approximation
+    // of it.
+    //
+    // Skipped when our king is frozen *after* the cast. That covers two distinct
+    // traps, and `zone.contains(king_sq)` would only catch the first: our king caught
+    // in our own zone (freeze hits every piece in the 3x3 regardless of owner), and
+    // our king already frozen by an older field the opponent laid anywhere on the
+    // board. A frozen king is frozen like any other piece, even in check
+    // (`sacredRoyal` off is canonical), and `pseudo_legal_moves` walks
+    // `own.minus(frozen)` -- so in both cases it has no moves at all to contribute.
+    let king_targets = crate::rays::KING_ATTACKS[king_sq.0 as usize].intersect(enemy_bb);
+    if !frozen_after.contains(king_sq) && !king_targets.is_empty() {
+        let cast = SpellCast { kind: SpellKind::Freeze, square: s };
+        let hypo = crate::legal::position_with_field(pos, cast);
+        for t in king_targets.iter() {
+            // Capturing the enemy king runs through `after_count <= before_count.max(1)`
+            // instead of `king_dest_safe`; don't duplicate that rule, decline. This is
+            // dead today -- an unfrozen king of ours adjacent to theirs is itself an
+            // attacker of their king, so the mechanism-4 guard above already declined
+            // -- but it is what keeps this loop honest if that guard is ever narrowed.
+            if pos.board.get(t).is_some_and(|q| q.kind == PieceKind::King) {
+                return Delta::NeedsRescan;
+            }
+            let mv = PieceMove::quiet(king_sq, t);
+            if in_baseline(baseline, mv) {
+                continue;
+            }
+            if crate::legal::king_dest_safe(&hypo, king_sq, t, enemy) {
+                out.push(mv);
+            }
+        }
+    }
+
     Delta::Complete
 }
 
@@ -415,6 +435,142 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(captures_enabled_by(&pos, cast, &baseline, &mut out), Delta::Complete);
         assert!(out.contains(&d4e4), "freezing the pinner must enable Rd4xe4, got {out:?}");
+    }
+
+    #[test]
+    fn freezing_the_last_defender_lets_the_king_capture() {
+        // Black Nd2 sits next to White Ke1, defended only by Ra2. Kxd2 is illegal.
+        // freeze@a3 covers a2, so the knight is undefended and Kxd2 becomes legal.
+        let mut pos = Position { board: crate::board::Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(crate::types::Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d2").unwrap(), Some(crate::types::Piece { color: Color::Black, kind: PieceKind::Knight }));
+        pos.board.set(Square::from_str("a2").unwrap(), Some(crate::types::Piece { color: Color::Black, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("h8").unwrap(), Some(crate::types::Piece { color: Color::Black, kind: PieceKind::King }));
+
+        let baseline = crate::legal::legal_moves(&pos);
+        let kxd2 = PieceMove::quiet(Square::from_str("e1").unwrap(), Square::from_str("d2").unwrap());
+        assert!(!baseline.contains(&kxd2), "Kxd2 must be illegal while Ra2 defends d2");
+
+        let cast = SpellCast { kind: SpellKind::Freeze, square: Square::from_str("a3").unwrap() };
+        let mut out = Vec::new();
+        assert_eq!(captures_enabled_by(&pos, cast, &baseline, &mut out), Delta::Complete);
+        assert!(out.contains(&kxd2), "freezing the defender must enable Kxd2, got {out:?}");
+    }
+
+    /// The own-freeze trap, half one: our king inside the zone we are casting. Freeze
+    /// hits every piece in the 3x3 regardless of owner (rules/30-freeze.md), and a
+    /// frozen king is frozen like any other piece -- `pseudo_legal_moves` walks
+    /// `own.minus(frozen)`, so it has *no* moves. The removed-defender mechanism must
+    /// therefore contribute nothing, even though the defender really is silenced.
+    #[test]
+    fn a_king_caught_in_our_own_freeze_zone_captures_nothing() {
+        // Nb2 sits beside Ka1, guarded only by Rb3. freeze@a2 silences Rb3 -- and
+        // freezes our own king along with it, so Kxb2 stays illegal.
+        let mut pos = empty_board();
+        put(&mut pos, "a1", Color::White, PieceKind::King);
+        put(&mut pos, "d4", Color::White, PieceKind::Rook);
+        put(&mut pos, "b2", Color::Black, PieceKind::Knight);
+        put(&mut pos, "b3", Color::Black, PieceKind::Rook);
+        put(&mut pos, "h8", Color::Black, PieceKind::King);
+
+        let baseline = legal_moves(&pos);
+        let kxb2 = PieceMove::quiet(sq("a1"), sq("b2"));
+        assert!(!baseline.contains(&kxb2), "fixture is wrong: Rb3 must guard b2");
+        // The geometry really is live: a cast that silences Rb3 while sparing our
+        // king does legalise Kxb2, so this fixture is not passing by accident.
+        let spares_king = SpellCast { kind: SpellKind::Freeze, square: sq("b4") };
+        assert!(
+            rescan_oracle(&pos, spares_king, &baseline).contains(&kxb2),
+            "fixture is wrong: freeze@b4 must enable Kxb2",
+        );
+        assert_delta_sound(&pos, spares_king);
+
+        // ...but freeze@a2 covers a1 as well, so the same silencing buys nothing.
+        let traps_king = SpellCast { kind: SpellKind::Freeze, square: sq("a2") };
+        assert!(
+            rescan_oracle(&pos, traps_king, &baseline).is_empty(),
+            "fixture is wrong: a frozen king has no moves",
+        );
+        assert_delta_sound(&pos, traps_king);
+    }
+
+    /// The own-freeze trap, half two -- the half `zone.contains(king_sq)` cannot see.
+    /// Our king can already be frozen by a field the *opponent* laid last ply, far
+    /// outside the zone we are casting. It still has zero legal moves, so the
+    /// removed-defender mechanism must still contribute nothing. This is Task 4's
+    /// bug 1 one level up: the zone is not the predicate, `frozen_after` is.
+    #[test]
+    fn a_king_frozen_by_an_older_field_captures_nothing() {
+        // Nd2 sits beside Ke1, guarded only by Rb2. freeze@b3 silences Rb2 and comes
+        // nowhere near e1 -- but Black froze e1 last ply, so Kxd2 remains illegal.
+        let mut pos = empty_board();
+        put(&mut pos, "e1", Color::White, PieceKind::King);
+        put(&mut pos, "a1", Color::White, PieceKind::Rook);
+        put(&mut pos, "d2", Color::Black, PieceKind::Knight);
+        put(&mut pos, "b2", Color::Black, PieceKind::Rook);
+        put(&mut pos, "h8", Color::Black, PieceKind::King);
+
+        let cast = SpellCast { kind: SpellKind::Freeze, square: sq("b3") };
+        let kxd2 = PieceMove::quiet(sq("e1"), sq("d2"));
+        assert!(!crate::spells::FREEZE_ZONE[sq("b3").0 as usize].contains(sq("e1")));
+
+        // Without the opponent's field this is a textbook mechanism-3 win.
+        let free_baseline = legal_moves(&pos);
+        assert!(!free_baseline.contains(&kxd2), "fixture is wrong: Rb2 must guard d2");
+        assert!(
+            rescan_oracle(&pos, cast, &free_baseline).contains(&kxd2),
+            "fixture is wrong: freeze@b3 must enable Kxd2 for an unfrozen king",
+        );
+        assert_delta_sound(&pos, cast);
+
+        // Black froze e1 on their turn; the field is still live on ours.
+        add_field(&mut pos, "e1", Color::Black, SpellKind::Freeze);
+        let baseline = legal_moves(&pos);
+        assert!(
+            !baseline.iter().any(|mv| mv.from == sq("e1")),
+            "fixture is wrong: our king must be frozen solid",
+        );
+        assert!(
+            !rescan_oracle(&pos, cast, &baseline).iter().any(|mv| mv.from == sq("e1")),
+            "fixture is wrong: a frozen king has no moves",
+        );
+        assert_delta_sound(&pos, cast);
+    }
+
+    /// `king_dest_safe` is the wrong rule for *capturing the enemy king*, which
+    /// `legal_moves` decides with `after_count <= before_count.max(1)` instead -- a
+    /// king may legally walk onto a defended square to take a king. So the
+    /// removed-defender loop must never answer for an enemy-king target; it declines.
+    ///
+    /// The geometry only exists because the enemy king is frozen: two adjacent
+    /// *unfrozen* kings are in mutual check, and the check guard would decline first.
+    #[test]
+    fn freeze_that_legalises_taking_a_frozen_enemy_king_declines() {
+        // We froze Black's king on c3 last turn, so Kd2 gives no check. Ke1xd2 is
+        // illegal while both Ra2 and Rd8 cover d2 (after_count 2 > 1); freeze@a1
+        // silences Ra2 and makes it legal. `king_dest_safe` would say the opposite,
+        // since Rd8 still covers d2.
+        let mut pos = empty_board();
+        put(&mut pos, "e1", Color::White, PieceKind::King);
+        put(&mut pos, "d2", Color::Black, PieceKind::King);
+        put(&mut pos, "a2", Color::Black, PieceKind::Rook);
+        put(&mut pos, "d8", Color::Black, PieceKind::Rook);
+        add_field(&mut pos, "c3", Color::White, SpellKind::Freeze);
+
+        let baseline = legal_moves(&pos);
+        let kxd2 = PieceMove::quiet(sq("e1"), sq("d2"));
+        assert!(!baseline.contains(&kxd2), "fixture is wrong: Ke1xd2 must start illegal");
+        let cast = SpellCast { kind: SpellKind::Freeze, square: sq("a1") };
+        assert!(
+            rescan_oracle(&pos, cast, &baseline).contains(&kxd2),
+            "fixture is wrong: freeze@a1 must enable Ke1xd2",
+        );
+        // ...and `king_dest_safe` disagrees, which is the whole point: d2 is still
+        // covered by Rd8 in the hypothetical, so emitting on that predicate would
+        // *drop* a legal capture from a supposedly authoritative answer.
+        let hypo = crate::legal::position_with_field(&pos, cast);
+        assert!(!crate::legal::king_dest_safe(&hypo, sq("e1"), sq("d2"), Color::Black));
+        assert_delta_sound(&pos, cast);
     }
 
     /// Mechanism 3 (Task 5's): freezing the last defender of a piece standing next
