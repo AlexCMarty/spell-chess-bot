@@ -260,7 +260,7 @@ EOF
 **Files:**
 - Modify: `crates/core/src/spell_delta.rs:64-125` (insert `JumpExposure` struct + `jump_exposure_scan` fn between `slider_scan` and `NodeContext`; extend `NodeContext` struct and `NodeContext::new`)
 - Modify: `crates/core/src/spell_delta.rs:213-216` (only the `attackers_to` call and the comment above it inside `jump_captures` — the rest of the function, including the double-check decline logic that follows, is unchanged)
-- Modify: `crates/core/src/spell_delta.rs` (add two white-box unit tests to `mod tests`: the exposure-scan check, and a regression fixture for a stacked-transparency bug found and fixed during this task's own execution — see the ruling before the `JumpExposure` code block below)
+- Modify: `crates/core/src/spell_delta.rs` (add three white-box unit tests to `mod tests`: the exposure-scan check, a regression fixture for a stacked-transparency bug found and fixed during this task's own execution, and a second regression fixture (found by task review) isolating the walk-through-transparency loop itself — see the two rulings before and after the `JumpExposure` code block below)
 
 **Interfaces:**
 - Consumes: `crate::rays::{ray_attacks, ROOK_DIRS, BISHOP_DIRS}` (all already `pub` in `rays.rs`), `Bitboard::{EMPTY, with, contains, intersect, iter, union}`, `Board::{get, occupancy}`.
@@ -348,7 +348,47 @@ Add to `mod tests` in `crates/core/src/spell_delta.rs`, right after the 7 tests 
         );
         assert!(out.is_empty(), "a declining call must not touch `out`");
     }
+
+    /// The walk-through-transparency guard itself, isolated: a WRONG-KIND
+    /// piece (a knight, which can never check via a straight-line ray) sits
+    /// on its own transparent square between the blocker and the real
+    /// attacker. The scan must not stop at the knight -- it doesn't match,
+    /// but it also doesn't block (its own square is jump-transparent), so
+    /// the walk must continue past it to find the rook. This is the fixture
+    /// `jump_exposure_sees_past_an_already_transparent_revealed_piece` above
+    /// cannot cover: that one only ever needs a single hop (g4 is empty
+    /// there), so it stays green even if the "keep walking" step is deleted
+    /// entirely. This one needs two hops and dies if it is (found by task
+    /// review during Task 2, 2026-09-02 -- see the ruling above this test).
+    #[test]
+    fn jump_exposure_walks_past_a_non_matching_piece_on_a_transparent_square() {
+        let mut pos = empty_board();
+        put(&mut pos, "g2", Color::Black, PieceKind::King);
+        put(&mut pos, "g3", Color::Black, PieceKind::Queen);
+        put(&mut pos, "g4", Color::White, PieceKind::Knight);
+        put(&mut pos, "g5", Color::White, PieceKind::Rook);
+        put(&mut pos, "e1", Color::White, PieceKind::King);
+        pos.side_to_move = Color::Black;
+        add_field(&mut pos, "g4", Color::White, SpellKind::Jump);
+
+        let ctx = NodeContext::new(&pos);
+        assert_eq!(
+            ctx.jump_exposure.revealed_by(sq("g3")),
+            Bitboard::from_square(sq("g5")),
+            "fixture is wrong: the walk must skip the non-matching knight on g4 (transparent) and find the rook on g5",
+        );
+    }
 ```
+
+**Ruling (recorded 2026-09-02, second round — see the SDD ledger):** task review
+on the first round of this fix found that `jump_exposure_sees_past_an_already_
+transparent_revealed_piece` above only exercises the `slider_occ` -> `real_occ`
+swap (one loop iteration, since g4 is empty in that fixture) — it does not
+exercise the loop actually continuing *past* a transparent square, so a
+mutation removing `if !jump.contains(next) { break; }` entirely would still
+pass it. `jump_exposure_walks_past_a_non_matching_piece_on_a_transparent_square`
+(just added above) forces a second iteration and closes that gap; Task 3's
+Step 4 targets this new test, not the single-hop one.
 
 - [ ] **Step 2: Run it to verify it fails to compile**
 
@@ -524,8 +564,8 @@ Leave the rest of the function (the double-check decline, the `sliders.reach` ea
 ~/.cargo/bin/cargo test -p spellchess-core --lib spell_delta::tests -- --no-fail-fast
 ```
 
-Expected: all tests PASS, including the two new white-box tests, the stacked-transparency
-regression fixture, and all 7 fixtures from Task 1.
+Expected: all tests PASS, including the three new white-box tests and all 7 fixtures from
+Task 1.
 
 - [ ] **Step 7: Run the full workspace test suite**
 
@@ -631,7 +671,10 @@ to:
             break;
 ```
 
-Run the same test command. Expected: `jump_exposure_sees_past_an_already_transparent_revealed_piece` FAILS (it should find nothing at g3, or find the wrong thing, once the walk can never see past g5). Revert.
+Run the same test command. Expected: `jump_exposure_walks_past_a_non_matching_piece_on_a_transparent_square`
+FAILS (it needs two hops through g4 to reach g5; `jump_exposure_sees_past_an_already_
+transparent_revealed_piece` only needs one hop and does NOT fail on this mutation —
+that is expected, not a problem, it just isn't the test that covers this guard). Revert.
 
 - [ ] **Step 5: Confirm the file is back to the Task 2 committed state and all tests pass**
 
