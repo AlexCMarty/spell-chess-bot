@@ -42,7 +42,7 @@ pub fn captures_enabled_by(
     let start_len = out.len();
     let delta = match cast.kind {
         SpellKind::Jump => jump_captures(pos, cast.square, baseline, out),
-        SpellKind::Freeze => Delta::NeedsRescan,
+        SpellKind::Freeze => freeze_captures(pos, cast.square, baseline, out),
     };
     if delta == Delta::NeedsRescan {
         out.truncate(start_len);
@@ -153,12 +153,214 @@ fn jump_captures(
     Delta::Complete
 }
 
+/// Pseudo-legal capture destinations for the piece standing on `from`, ignoring
+/// pins and check -- the caller filters those. `slider_occ` already has live jump
+/// squares subtracted.
+fn piece_capture_targets(pos: &Position, from: Square, slider_occ: Bitboard, enemy_bb: Bitboard) -> Bitboard {
+    let Some(piece) = pos.board.get(from) else { return Bitboard::EMPTY };
+    let idx = from.0 as usize;
+    let raw = match piece.kind {
+        PieceKind::Knight => crate::rays::KNIGHT_ATTACKS[idx],
+        PieceKind::King => crate::rays::KING_ATTACKS[idx],
+        PieceKind::Pawn => crate::rays::PAWN_ATTACKS[piece.color.index()][idx],
+        kind => slider_attacks(kind, from, slider_occ),
+    };
+    raw.intersect(enemy_bb)
+}
+
+/// Freeze never changes reachability, only control (rules/30-freeze.md: frozen
+/// pieces "exert no control" but "still block sliding pieces"). Occupancy is
+/// untouched, so `pseudo_legal_moves` can only shrink; every newly *legal* move was
+/// already pseudo-legal and was rejected by one of `legal_moves`' filters. Freeze
+/// can therefore only flip one of these:
+///
+/// 1. the check filters (`checker_count >= 2`, `evasion_allows`) -- declined below;
+/// 2. the pin filter -- the released pins this function computes;
+/// 3. `king_dest_safe` for a piece standing beside our king -- declined below,
+///    Task 5's mechanism;
+/// 4. `after_count <= before_count.max(1)` for capturing the enemy king -- declined
+///    below.
+fn freeze_captures(
+    pos: &Position,
+    s: Square,
+    baseline: &[PieceMove],
+    out: &mut Vec<PieceMove>,
+) -> Delta {
+    let us = pos.side_to_move;
+    let enemy = us.opposite();
+    let Some(king_sq) = pos.board.king_square(us) else {
+        return Delta::NeedsRescan;
+    };
+
+    let frozen_before = crate::spells::frozen_bb(pos);
+    let zone = crate::spells::FREEZE_ZONE[s.0 as usize];
+    let frozen_after = frozen_before.union(zone);
+    let enemy_bb = pos.board.color_bb(enemy);
+    let newly_frozen_them = frozen_after.minus(frozen_before).intersect(enemy_bb);
+
+    // Freezing only our own pieces (or nothing) strictly *removes* enemy-free
+    // control from nobody: no enemy piece loses control, so no move of ours can
+    // become legal. `move_survives_own_freeze` in legal.rs handles the losses.
+    if newly_frozen_them.is_empty() {
+        return Delta::Complete;
+    }
+
+    // En passant is a capture and interacts with freeze in ways this fast path
+    // does not model; the rescan already special-cases it.
+    if pos.en_passant.is_some() {
+        return Delta::NeedsRescan;
+    }
+
+    let jump = crate::spells::jump_bb(pos);
+    let occ = pos.board.occupancy();
+    let slider_occ = occ.minus(jump);
+
+    let checkers_before = crate::attacks::attackers_to(pos, king_sq, enemy, frozen_before, slider_occ);
+    let checkers_after = crate::attacks::attackers_to(pos, king_sq, enemy, frozen_after, slider_occ);
+    if !checkers_before.is_empty() || !checkers_after.is_empty() {
+        // Check dispelled (or still live): the newly legal set is essentially the
+        // whole position, which is not a cheap delta. This is what the escape
+        // hatch exists for.
+        return Delta::NeedsRescan;
+    }
+
+    // Mechanism 4. Capturing the enemy king is gated on
+    // `after_count <= before_count.max(1)`, and freezing enemy pieces only shrinks
+    // `after_count` -- so a king capture that was illegal can become legal. That
+    // rule is the subtlest in the engine; don't duplicate it, just decline whenever
+    // we have any pseudo-legal shot at the enemy king.
+    if let Some(their_king) = pos.board.king_square(enemy) {
+        if !crate::attacks::attackers_to(pos, their_king, us, frozen_after, slider_occ).is_empty() {
+            return Delta::NeedsRescan;
+        }
+    }
+
+    // Mechanism 3. Freezing the last defender of an enemy piece standing beside our
+    // king lets the king take it -- no pin involved, so the loop below would miss
+    // it. Task 5 computes these; until then, decline. `king_dest_safe` clears both
+    // our king and the target before testing, so x-rays through either square count
+    // as defenders; mirror that here.
+    if !frozen_after.contains(king_sq) {
+        for t in crate::rays::KING_ATTACKS[king_sq.0 as usize].intersect(enemy_bb).iter() {
+            if in_baseline(baseline, PieceMove::quiet(king_sq, t)) {
+                continue;
+            }
+            let mut probe = *pos;
+            probe.board.set(king_sq, None);
+            probe.board.set(t, None);
+            let probe_occ = probe.board.occupancy().minus(jump);
+            let defenders = crate::attacks::attackers_to(&probe, t, enemy, frozen_before, probe_occ);
+            if !defenders.intersect(newly_frozen_them).is_empty() {
+                return Delta::NeedsRescan;
+            }
+        }
+    }
+
+    let pins_before = pins_of(pos, king_sq, us, frozen_before, jump);
+    let pins_after = pins_of(pos, king_sq, us, frozen_after, jump);
+
+    // A pin ray can *grow* rather than vanish: a frozen pinner sitting on a live
+    // jump square stops pinning but stays transparent, so `pins_of` walks on to a
+    // further slider. The blocker is still pinned -- so it never reaches `released`
+    // -- yet its ray, and with it its legal captures, just got longer. (This loop
+    // also covers a piece pinned only *after* the cast, whose before-ray is empty.)
+    for p in pins_after.pinned.iter() {
+        if pins_before.rays[p.0 as usize] != pins_after.rays[p.0 as usize] {
+            return Delta::NeedsRescan;
+        }
+    }
+
+    // Mechanism 2, the one this function actually computes.
+    let released = pins_before.pinned.minus(pins_after.pinned);
+    for p in released.iter() {
+        // Freeze hits our own pieces too (rules/30-freeze.md: "every piece in the
+        // zone regardless of owner"), and a field the opponent laid last ply may
+        // still be pinning ours down from outside the zone we are casting. Either
+        // way a frozen piece has zero legal moves and contributes no captures.
+        if frozen_after.contains(p) {
+            continue;
+        }
+        let piece = pos.board.get(p).expect("pinned square is occupied");
+        // Pawn captures carry promotion and en-passant variants; not worth
+        // modelling here for a case this rare.
+        if piece.kind == PieceKind::Pawn {
+            return Delta::NeedsRescan;
+        }
+        // `p` is never our king (a king is never its own pin blocker) and never
+        // reaches the enemy king (the mechanism-4 guard above already declined),
+        // so every target here is an ordinary piece and, with no check and no pin
+        // left, an unconditionally legal capture.
+        for t in piece_capture_targets(pos, p, slider_occ, enemy_bb).iter() {
+            let mv = PieceMove::quiet(p, t);
+            if in_baseline(baseline, mv) {
+                continue;
+            }
+            out.push(mv);
+        }
+    }
+    Delta::Complete
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::legal::legal_moves;
     use crate::position::SpellKind;
     use crate::types::Square;
+
+    fn sq(s: &str) -> Square {
+        Square::from_str(s).unwrap()
+    }
+
+    fn put(pos: &mut Position, s: &str, color: Color, kind: PieceKind) {
+        pos.board.set(sq(s), Some(crate::types::Piece { color, kind }));
+    }
+
+    fn empty_board() -> Position {
+        Position { board: crate::board::Board::empty(), ..Position::starting() }
+    }
+
+    fn add_field(pos: &mut Position, s: &str, owner: Color, kind: SpellKind) {
+        pos.fields.push(crate::position::SpellField {
+            square: sq(s),
+            owner,
+            kind,
+            expires_after_ply: pos.ply + 1,
+        });
+    }
+
+    /// Exactly what `generate_quiescence_from`'s rescan branch computes; the same
+    /// body as `rescan_oracle` in tests/spell_delta_soundness.rs.
+    fn rescan_oracle(pos: &Position, cast: SpellCast, baseline: &[PieceMove]) -> Vec<PieceMove> {
+        legal_moves(&crate::legal::position_with_field(pos, cast))
+            .into_iter()
+            .filter(|mv| {
+                let is_cap = pos.board.get(mv.to).is_some() || mv.is_en_passant;
+                is_cap && !baseline.contains(mv)
+            })
+            .collect()
+    }
+
+    fn key(mv: &PieceMove) -> (u8, u8, u8, bool, bool) {
+        (mv.from.0, mv.to.0, mv.promotion.map(|p| p as u8).unwrap_or(255), mv.is_en_passant, mv.is_castle)
+    }
+
+    /// Assert the delta either declines or agrees exactly with the rescan.
+    fn assert_delta_sound(pos: &Position, cast: SpellCast) -> Delta {
+        let baseline = legal_moves(pos);
+        let mut fast = Vec::new();
+        let delta = captures_enabled_by(pos, cast, &baseline, &mut fast);
+        if delta == Delta::Complete {
+            let mut got: Vec<_> = fast.iter().map(key).collect();
+            let mut want: Vec<_> = rescan_oracle(pos, cast, &baseline).iter().map(key).collect();
+            got.sort();
+            want.sort();
+            assert_eq!(got, want, "delta disagreed with the rescan for {cast:?}");
+        } else {
+            assert!(fast.is_empty(), "a declining call must not touch `out`");
+        }
+        delta
+    }
 
     #[test]
     fn declining_leaves_the_output_buffer_untouched() {
@@ -170,6 +372,184 @@ mod tests {
         if captures_enabled_by(&pos, cast, &baseline, &mut out) == Delta::NeedsRescan {
             assert_eq!(out, before, "a declining call must not touch `out`");
         }
+    }
+
+    #[test]
+    fn freezing_a_pinner_frees_the_pinned_piece_to_capture() {
+        // Black Rd8 pins White Rd4 to Kd1 down the d-file. Rd4 cannot take the
+        // undefended Be4 while pinned. freeze@c8 covers d8, killing the pin, so
+        // Rd4xe4 becomes legal -- a capture only the freeze enables.
+        let mut pos = Position { board: crate::board::Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("d1").unwrap(), Some(crate::types::Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d4").unwrap(), Some(crate::types::Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("e4").unwrap(), Some(crate::types::Piece { color: Color::Black, kind: PieceKind::Bishop }));
+        pos.board.set(Square::from_str("d8").unwrap(), Some(crate::types::Piece { color: Color::Black, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("h8").unwrap(), Some(crate::types::Piece { color: Color::Black, kind: PieceKind::King }));
+
+        let baseline = crate::legal::legal_moves(&pos);
+        let d4e4 = PieceMove::quiet(Square::from_str("d4").unwrap(), Square::from_str("e4").unwrap());
+        assert!(!baseline.contains(&d4e4), "Rd4xe4 must be pinned-illegal without the spell");
+
+        let cast = SpellCast { kind: SpellKind::Freeze, square: Square::from_str("c8").unwrap() };
+        let mut out = Vec::new();
+        assert_eq!(captures_enabled_by(&pos, cast, &baseline, &mut out), Delta::Complete);
+        assert!(out.contains(&d4e4), "freezing the pinner must enable Rd4xe4, got {out:?}");
+    }
+
+    /// Mechanism 3 (Task 5's): freezing the last defender of a piece standing next
+    /// to our king lets the king take it. That is a capture the freeze enables with
+    /// no pin involved, so the released-pin delta must decline rather than claim
+    /// `Complete` on an answer that misses it.
+    #[test]
+    fn freezing_the_last_defender_of_a_piece_next_to_our_king_must_not_claim_complete() {
+        // Black Nd2 sits beside Ke1, guarded only by Rd8 down the d-file. Kxd2 is
+        // illegal now; freeze@d8 removes the guard and makes it legal.
+        let mut pos = empty_board();
+        put(&mut pos, "e1", Color::White, PieceKind::King);
+        put(&mut pos, "d2", Color::Black, PieceKind::Knight);
+        put(&mut pos, "d8", Color::Black, PieceKind::Rook);
+        put(&mut pos, "h8", Color::Black, PieceKind::King);
+
+        let baseline = legal_moves(&pos);
+        let kxd2 = PieceMove::quiet(sq("e1"), sq("d2"));
+        assert!(!baseline.contains(&kxd2), "Kxd2 must be guard-illegal without the spell");
+        let cast = SpellCast { kind: SpellKind::Freeze, square: sq("d8") };
+        assert!(
+            rescan_oracle(&pos, cast, &baseline).contains(&kxd2),
+            "fixture is wrong: freeze@d8 must enable Kxd2",
+        );
+        assert_delta_sound(&pos, cast);
+    }
+
+    /// Freeze can newly enable *capturing the enemy king*: the legality test is
+    /// `after_count <= before_count.max(1)` and freezing enemy pieces shrinks
+    /// `after_count`. Here two jump-transparent black rooks share the e-file behind
+    /// the white bishop, so Bxd8 exposes Ke1 to both at once -- unless one is frozen.
+    #[test]
+    fn freezing_an_attacker_that_makes_an_enemy_king_capture_legal_must_not_claim_complete() {
+        let mut pos = empty_board();
+        put(&mut pos, "e1", Color::White, PieceKind::King);
+        put(&mut pos, "e4", Color::White, PieceKind::Bishop);
+        put(&mut pos, "d5", Color::Black, PieceKind::King);
+        put(&mut pos, "e6", Color::Black, PieceKind::Rook);
+        put(&mut pos, "e7", Color::Black, PieceKind::Rook);
+        put(&mut pos, "a1", Color::White, PieceKind::Rook);
+        add_field(&mut pos, "e6", Color::Black, SpellKind::Jump);
+        add_field(&mut pos, "e7", Color::Black, SpellKind::Jump);
+
+        let baseline = legal_moves(&pos);
+        let bxd5 = PieceMove::quiet(sq("e4"), sq("d5"));
+        assert!(!baseline.contains(&bxd5), "fixture is wrong: Bxd5 must start illegal");
+        // freeze@e8 covers e7 but *not* e6, so the e6 pin on Be4 survives and the
+        // released-pin delta has nothing to say -- yet Bxd5 becomes legal.
+        let cast = SpellCast { kind: SpellKind::Freeze, square: sq("e8") };
+        assert!(
+            rescan_oracle(&pos, cast, &baseline).contains(&bxd5),
+            "fixture is wrong: freeze@e8 must enable Bxd5",
+        );
+        assert_delta_sound(&pos, cast);
+    }
+
+    /// A pin ray can *grow* instead of vanishing: freezing a pinner that stands on a
+    /// live jump square makes it a non-pinner but leaves it transparent, so the walk
+    /// runs on to a further enemy slider. The blocker stays pinned (so it is not in
+    /// `released`) yet gains new legal destinations, including a capture.
+    #[test]
+    fn a_pin_ray_that_grows_under_freeze_must_not_claim_complete() {
+        // Rd5 pins Rd3 to Kd1 with a ray stopping at d5. freeze@d6 covers d5 only:
+        // the frozen rook stops pinning but stays jump-transparent, so the walk runs
+        // on to Qd8 and the pin ray now reaches d8. Rd3xd8 is newly legal.
+        let mut pos = empty_board();
+        put(&mut pos, "d1", Color::White, PieceKind::King);
+        put(&mut pos, "d3", Color::White, PieceKind::Rook);
+        put(&mut pos, "d5", Color::Black, PieceKind::Rook);
+        put(&mut pos, "d8", Color::Black, PieceKind::Queen);
+        put(&mut pos, "h8", Color::Black, PieceKind::King);
+        add_field(&mut pos, "d5", Color::Black, SpellKind::Jump);
+
+        let baseline = legal_moves(&pos);
+        let rxd8 = PieceMove::quiet(sq("d3"), sq("d8"));
+        assert!(!baseline.contains(&rxd8), "fixture is wrong: Rxd8 must start illegal");
+        let cast = SpellCast { kind: SpellKind::Freeze, square: sq("d6") };
+        assert!(
+            rescan_oracle(&pos, cast, &baseline).contains(&rxd8),
+            "fixture is wrong: freeze@d6 must enable Rxd8",
+        );
+        assert_delta_sound(&pos, cast);
+    }
+
+    /// A piece released from a pin can already be frozen by a field the *opponent*
+    /// laid last ply, well outside the zone we are about to cast. It has no legal
+    /// moves at all, so it must not contribute captures.
+    #[test]
+    fn a_released_piece_already_frozen_by_an_older_field_contributes_nothing() {
+        let mut pos = empty_board();
+        put(&mut pos, "d1", Color::White, PieceKind::King);
+        put(&mut pos, "d4", Color::White, PieceKind::Rook);
+        put(&mut pos, "e4", Color::Black, PieceKind::Bishop);
+        put(&mut pos, "d8", Color::Black, PieceKind::Rook);
+        put(&mut pos, "h8", Color::Black, PieceKind::King);
+        // Black froze d4 on their turn; the field is still live on ours.
+        add_field(&mut pos, "d4", Color::Black, SpellKind::Freeze);
+
+        let baseline = legal_moves(&pos);
+        let cast = SpellCast { kind: SpellKind::Freeze, square: sq("c8") };
+        assert!(
+            rescan_oracle(&pos, cast, &baseline).is_empty(),
+            "fixture is wrong: a frozen rook has no moves",
+        );
+        assert_delta_sound(&pos, cast);
+    }
+
+    /// A released pin can hand a *pawn* a capture, and on the last rank that capture
+    /// carries four promotion variants that `PieceMove::quiet` cannot express. The
+    /// geometry needs the king on the far side of the pawn -- a pinner beyond a
+    /// rank-7 white pawn would have to stand on rank 8, adjacent to it, so the same
+    /// cast would always freeze the pawn too.
+    #[test]
+    fn a_released_pawn_that_captures_into_promotion_declines() {
+        let mut pos = empty_board();
+        put(&mut pos, "e8", Color::White, PieceKind::King);
+        put(&mut pos, "e7", Color::White, PieceKind::Pawn);
+        put(&mut pos, "e6", Color::Black, PieceKind::Rook);
+        put(&mut pos, "d8", Color::Black, PieceKind::Knight);
+        put(&mut pos, "a1", Color::Black, PieceKind::King);
+
+        let baseline = legal_moves(&pos);
+        let quiet_exd8 = PieceMove::quiet(sq("e7"), sq("d8"));
+        assert!(!baseline.contains(&quiet_exd8), "fixture is wrong: the pawn starts pinned");
+        // freeze@d5 covers e6 but not e7: the pin dies, the pawn does not.
+        let cast = SpellCast { kind: SpellKind::Freeze, square: sq("d5") };
+        let enabled = rescan_oracle(&pos, cast, &baseline);
+        assert!(
+            enabled.iter().any(|mv| mv.from == sq("e7") && mv.to == sq("d8") && mv.promotion.is_some()),
+            "fixture is wrong: freeze@d5 must enable exd8=Q, got {enabled:?}",
+        );
+        assert!(!enabled.contains(&quiet_exd8), "a promotion capture is never promotion-less");
+        assert_delta_sound(&pos, cast);
+    }
+
+    /// The classic en-passant pin: exd6 would clear *two* pawns off rank 5 at once
+    /// and expose Kh5 to Ra5, which is not a pin `pins_of` can see. Freezing the rook
+    /// makes it legal, so the released-pin delta would miss it entirely.
+    #[test]
+    fn an_en_passant_capture_unlocked_by_freezing_the_x_ray_rook_declines() {
+        let mut pos = empty_board();
+        put(&mut pos, "h5", Color::White, PieceKind::King);
+        put(&mut pos, "e5", Color::White, PieceKind::Pawn);
+        put(&mut pos, "d5", Color::Black, PieceKind::Pawn);
+        put(&mut pos, "a5", Color::Black, PieceKind::Rook);
+        put(&mut pos, "h8", Color::Black, PieceKind::King);
+        pos.en_passant = Some(sq("d6"));
+
+        let baseline = legal_moves(&pos);
+        assert!(!baseline.iter().any(|mv| mv.is_en_passant), "fixture is wrong: exd6 must start illegal");
+        let cast = SpellCast { kind: SpellKind::Freeze, square: sq("a5") };
+        assert!(
+            rescan_oracle(&pos, cast, &baseline).iter().any(|mv| mv.is_en_passant),
+            "fixture is wrong: freeze@a5 must enable exd6 e.p.",
+        );
+        assert_delta_sound(&pos, cast);
     }
 
     /// The one geometry the ray delta cannot settle on its own: a slider that the
