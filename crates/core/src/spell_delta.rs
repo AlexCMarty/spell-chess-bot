@@ -240,6 +240,12 @@ fn freeze_captures(
     // it. Task 5 computes these; until then, decline. `king_dest_safe` clears both
     // our king and the target before testing, so x-rays through either square count
     // as defenders; mirror that here.
+    //
+    // Clearing `king_sq` from the probe is dead *today*: a slider whose ray to `t`
+    // runs through our king necessarily attacks the king first, so the check guard
+    // above would already have declined. It becomes load-bearing the moment that
+    // guard is relaxed -- which is exactly what Task 5 does when it replaces this
+    // decline with a real computation. Keep it.
     if !frozen_after.contains(king_sq) {
         for t in crate::rays::KING_ATTACKS[king_sq.0 as usize].intersect(enemy_bb).iter() {
             if in_baseline(baseline, PieceMove::quiet(king_sq, t)) {
@@ -259,13 +265,28 @@ fn freeze_captures(
     let pins_before = pins_of(pos, king_sq, us, frozen_before, jump);
     let pins_after = pins_of(pos, king_sq, us, frozen_after, jump);
 
-    // A pin ray can *grow* rather than vanish: a frozen pinner sitting on a live
-    // jump square stops pinning but stays transparent, so `pins_of` walks on to a
-    // further slider. The blocker is still pinned -- so it never reaches `released`
-    // -- yet its ray, and with it its legal captures, just got longer. (This loop
-    // also covers a piece pinned only *after* the cast, whose before-ray is empty.)
+    // A piece that stays pinned, with the very same ray, can still gain a capture --
+    // so neither `released` nor a ray comparison is enough on its own.
+    let jump_enemy = jump.intersect(enemy_bb);
     for p in pins_after.pinned.iter() {
+        // A pin ray can *grow* rather than vanish: a frozen pinner sitting on a live
+        // jump square stops pinning but stays transparent, so `pins_of` walks on to a
+        // further slider. The blocker is still pinned -- so it never reaches
+        // `released` -- yet its ray, and with it its legal captures, just got longer.
+        // (This arm also covers a piece pinned only *after* the cast, whose
+        // before-ray is empty.)
         if pins_before.rays[p.0 as usize] != pins_after.rays[p.0 as usize] {
+            return Delta::NeedsRescan;
+        }
+        // A pinned piece capturing *onto a live jump square* is the one case
+        // `legal_moves` resolves by clone-and-rescan (legal.rs: taking a jumped
+        // pinner can be legal, taking a jumped between-piece is not). That rescan
+        // runs on the *hypothetical* position, so freezing a slider elsewhere on the
+        // ray can flip it to legal while leaving the pin and its ray untouched.
+        // `jump_captures` declines the mirror-image case; do the same rather than
+        // duplicate the rule. `jump_enemy` is empty in the overwhelmingly common
+        // no-live-jump-field case, so this costs nothing.
+        if !pins_after.rays[p.0 as usize].intersect(jump_enemy).is_empty() {
             return Delta::NeedsRescan;
         }
     }
@@ -497,6 +518,37 @@ mod tests {
         assert!(
             rescan_oracle(&pos, cast, &baseline).is_empty(),
             "fixture is wrong: a frozen rook has no moves",
+        );
+        assert_delta_sound(&pos, cast);
+    }
+
+    /// The pin can survive the cast *completely unchanged* and still gain a capture.
+    /// `legal_moves` resolves "a pinned piece captures onto a live jump square" by
+    /// clone-and-rescan (legal.rs), and that rescan runs on the **hypothetical**
+    /// position -- so freezing a slider somewhere else on the ray can legalise it.
+    /// `released` is empty and the ray-change guard passes, so nothing else here
+    /// would catch it.
+    #[test]
+    fn a_pinned_piece_capturing_onto_a_live_jump_square_declines_under_freeze() {
+        // Rd5 pins Rd3 to Kd1 and sits on a live jump field, so Rxd5 lands on a
+        // square that stays transparent and leaves Qd8 shooting at d1 -- illegal.
+        // freeze@d7 covers d8 but not d5: the pin and its ray are untouched, yet
+        // silencing the queen makes exactly that capture legal.
+        let mut pos = empty_board();
+        put(&mut pos, "d1", Color::White, PieceKind::King);
+        put(&mut pos, "d3", Color::White, PieceKind::Rook);
+        put(&mut pos, "d5", Color::Black, PieceKind::Rook);
+        put(&mut pos, "d8", Color::Black, PieceKind::Queen);
+        put(&mut pos, "h8", Color::Black, PieceKind::King);
+        add_field(&mut pos, "d5", Color::Black, SpellKind::Jump);
+
+        let baseline = legal_moves(&pos);
+        let rxd5 = PieceMove::quiet(sq("d3"), sq("d5"));
+        assert!(!baseline.contains(&rxd5), "fixture is wrong: Rxd5 must start illegal");
+        let cast = SpellCast { kind: SpellKind::Freeze, square: sq("d7") };
+        assert!(
+            rescan_oracle(&pos, cast, &baseline).contains(&rxd5),
+            "fixture is wrong: freeze@d7 must enable Rxd5",
         );
         assert_delta_sound(&pos, cast);
     }
