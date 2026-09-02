@@ -5,3 +5,6 @@ edition = "2021"
 
 [dependencies]
 spellchess-core = { path = "../core" }
+
+[dev-dependencies]
+spellchess-cli = { path = "../cli" }

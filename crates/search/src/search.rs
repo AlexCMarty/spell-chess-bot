@@ -721,10 +721,15 @@ mod tests {
     }
 
     /// Regression guard for search speed on the starting position.
-    /// Depth 1, 3, 4, 6, and 15 share this test so they cannot run in parallel and
-    /// contend for the same cores. The bound is tuned for a release build; debug-build
-    /// overhead swamps the algorithmic win. Run with
-    /// `cargo test -p spellchess-search --release -- --ignored`.
+    /// Depths 1, 3, 4, 6 and 8 share this test so they cannot run in parallel and
+    /// contend for the same cores. Bounds are tuned for a release build on a
+    /// Raspberry Pi 5 (odysseus) and measured 2026-09-01 after the spell-delta
+    /// rewrite; a debug build's overhead swamps the algorithmic win. Depth 8 (a single
+    /// measurement of 143.536s) gets roughly 2x headroom rather than the ~1.7x used
+    /// elsewhere in this test, because it is the longest-running, most
+    /// thermal-throttling- and scheduler-contention-exposed case and the one most
+    /// likely to rot into flakiness (see the depth-15 bound this test used to carry).
+    /// Run with `cargo test -p spellchess-search --release -- --ignored`.
     #[test]
     #[ignore = "slow and misleading in a debug build; see doc comment"]
     fn depth_budget_stays_bounded_on_a_realistic_board() {
@@ -734,8 +739,8 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(result.is_some(), "a legal turn exists in the starting position");
         assert!(
-            elapsed < Duration::from_secs(1),
-            "depth-1 search on the starting position must finish in under 1s, took {elapsed:?}",
+            elapsed < Duration::from_millis(300),
+            "depth-1 search on the starting position must finish in under 300ms, took {elapsed:?}",
         );
 
         let start = std::time::Instant::now();
@@ -743,8 +748,8 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(result.is_some(), "a legal turn exists in the starting position");
         assert!(
-            elapsed < Duration::from_secs(5),
-            "depth-3 search on the starting position must finish in under 5s, took {elapsed:?}",
+            elapsed < Duration::from_millis(750),
+            "depth-3 search on the starting position must finish in under 750ms, took {elapsed:?}",
         );
 
         let start = std::time::Instant::now();
@@ -752,8 +757,8 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(result.is_some(), "a legal turn exists in the starting position");
         assert!(
-            elapsed < Duration::from_secs(3),
-            "depth-4 search on the starting position must finish in under 3s, took {elapsed:?}",
+            elapsed < Duration::from_millis(1500),
+            "depth-4 search on the starting position must finish in under 1500ms, took {elapsed:?}",
         );
 
         let start = std::time::Instant::now();
@@ -761,17 +766,17 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(result.is_some(), "a legal turn exists in the starting position");
         assert!(
-            elapsed < Duration::from_secs(5),
-            "depth-6 search on the starting position must finish in under 5s, took {elapsed:?}",
+            elapsed < Duration::from_secs(15),
+            "depth-6 search on the starting position must finish in under 15s, took {elapsed:?}",
         );
 
         let start = std::time::Instant::now();
-        let result = search(&pos, Budget::Depth(15));
+        let result = search(&pos, Budget::Depth(8));
         let elapsed = start.elapsed();
         assert!(result.is_some(), "a legal turn exists in the starting position");
         assert!(
-            elapsed < Duration::from_secs(15),
-            "depth-15 search on the starting position must finish in under 15s, took {elapsed:?}",
+            elapsed < Duration::from_secs(300),
+            "depth-8 search on the starting position must finish in under 300s, took {elapsed:?}",
         );
     }
 

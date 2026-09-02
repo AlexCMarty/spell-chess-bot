@@ -125,9 +125,9 @@ pub fn legal_moves(pos: &Position) -> Vec<PieceMove> {
         .collect()
 }
 
-struct PinMap {
-    pinned: Bitboard,
-    rays: [Bitboard; 64],
+pub(crate) struct PinMap {
+    pub(crate) pinned: Bitboard,
+    pub(crate) rays: [Bitboard; 64],
 }
 
 fn slider_matches_dir(kind: PieceKind, dir: (i8, i8)) -> bool {
@@ -139,7 +139,7 @@ fn slider_matches_dir(kind: PieceKind, dir: (i8, i8)) -> bool {
     }
 }
 
-fn pins_of(pos: &Position, king: Square, us: Color, frozen: Bitboard, jump: Bitboard) -> PinMap {
+pub(crate) fn pins_of(pos: &Position, king: Square, us: Color, frozen: Bitboard, jump: Bitboard) -> PinMap {
     let mut pinned = Bitboard::EMPTY;
     let mut rays = [Bitboard::EMPTY; 64];
     let them = us.opposite();
@@ -180,7 +180,7 @@ fn pins_of(pos: &Position, king: Square, us: Color, frozen: Bitboard, jump: Bitb
     PinMap { pinned, rays }
 }
 
-fn pin_ray(pins: &PinMap, from: Square) -> Option<Bitboard> {
+pub(crate) fn pin_ray(pins: &PinMap, from: Square) -> Option<Bitboard> {
     if pins.pinned.contains(from) {
         Some(pins.rays[from.0 as usize])
     } else {
@@ -204,7 +204,7 @@ fn evasion_allows(pos: &Position, king: Square, checker: Square, dest: Square, j
     between.contains(dest) && !jump.contains(dest)
 }
 
-fn king_dest_safe(pos: &Position, king_from: Square, dest: Square, enemy: Color) -> bool {
+pub(crate) fn king_dest_safe(pos: &Position, king_from: Square, dest: Square, enemy: Color) -> bool {
     // Copy is cheap; clearing the king (and a captured piece on dest) lets
     // is_square_attacked x-ray the vacated square. Frozen/jump come from probe.fields.
     let mut probe = *pos;
@@ -215,7 +215,7 @@ fn king_dest_safe(pos: &Position, king_from: Square, dest: Square, enemy: Color)
     !crate::attacks::is_square_attacked(&probe, dest, enemy)
 }
 
-fn position_with_field(pos: &Position, cast: SpellCast) -> Position {
+pub(crate) fn position_with_field(pos: &Position, cast: SpellCast) -> Position {
     let mut next = *pos;
     next.fields.push(SpellField {
         square: cast.square,
@@ -415,7 +415,7 @@ fn is_capture(pos: &Position, mv: &PieceMove) -> bool {
     pos.board.get(mv.to).is_some() || mv.is_en_passant
 }
 
-fn in_baseline(baseline: &[PieceMove], mv: PieceMove) -> bool {
+pub(crate) fn in_baseline(baseline: &[PieceMove], mv: PieceMove) -> bool {
     baseline.iter().any(|b| *b == mv)
 }
 
@@ -586,9 +586,19 @@ fn generate_quiescence_from(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn>
                 continue;
             }
             let cast = SpellCast { kind: SpellKind::Jump, square: sq };
-            for mv in legal_moves(&position_with_field(pos, cast)) {
-                if is_capture(pos, &mv) && !in_baseline(baseline, mv) {
-                    turns.push(Turn { spell: Some(cast), mv });
+            let mut fast = Vec::new();
+            match crate::spell_delta::captures_enabled_by(pos, cast, baseline, &mut fast) {
+                crate::spell_delta::Delta::Complete => {
+                    for mv in fast {
+                        turns.push(Turn { spell: Some(cast), mv });
+                    }
+                }
+                crate::spell_delta::Delta::NeedsRescan => {
+                    for mv in legal_moves(&position_with_field(pos, cast)) {
+                        if is_capture(pos, &mv) && !in_baseline(baseline, mv) {
+                            turns.push(Turn { spell: Some(cast), mv });
+                        }
+                    }
                 }
             }
         }
@@ -603,9 +613,19 @@ fn generate_quiescence_from(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn>
             let hits_them = zone.minus(frozen).intersect(their_bb);
             let cast = SpellCast { kind: SpellKind::Freeze, square: sq };
             if freeze_enemy_affects_this_ply(pos, hits_them, us, king_sq, checkers, &pins, frozen, slider_occ) {
-                for mv in legal_moves(&position_with_field(pos, cast)) {
-                    if is_capture(pos, &mv) && !in_baseline(baseline, mv) {
-                        turns.push(Turn { spell: Some(cast), mv });
+                let mut fast = Vec::new();
+                match crate::spell_delta::captures_enabled_by(pos, cast, baseline, &mut fast) {
+                    crate::spell_delta::Delta::Complete => {
+                        for mv in fast {
+                            turns.push(Turn { spell: Some(cast), mv });
+                        }
+                    }
+                    crate::spell_delta::Delta::NeedsRescan => {
+                        for mv in legal_moves(&position_with_field(pos, cast)) {
+                            if is_capture(pos, &mv) && !in_baseline(baseline, mv) {
+                                turns.push(Turn { spell: Some(cast), mv });
+                            }
+                        }
                     }
                 }
             }

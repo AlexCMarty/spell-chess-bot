@@ -271,11 +271,25 @@ that step was skipped.
 
 Success is identical search results at materially lower cost:
 
-| search | current | target |
-|---|---|---|
-| depth 6 | 13.5s | ≤4s |
-| depth 8 | 258s | ≤90s |
-| `generate_quiescence_turns_from` | 36–41µs | ≤4µs |
+| search | current | target | achieved (2026-09-01, post spell-delta rewrite) |
+|---|---|---|---|
+| depth 6 | 13.5s | ≤4s | 8.707s (340,473 nodes, 2,383,276 qnodes, 39,105 nps — node/qnode counts bit-identical to baseline) |
+| depth 8 | 258s | ≤90s | 143.536s (6,453,264 nodes, 17,437,140 qnodes, 44,959 nps — node/qnode counts bit-identical to baseline) |
+| `generate_quiescence_turns_from` | 36–41µs | ≤4µs | 15,501ns (starting position) / 17,702ns (6 plies in) |
+
+Both time targets were **missed**. Depth 6 landed at 8.7s against a 4s target (roughly
+2.2x over); depth 8 landed at 143.5s against a 90s target (roughly 1.6x over) — real
+wins (13.5s→8.7s and 258s→143.5s), just short of the spec's aspiration. Node and qnode
+counts are exactly unchanged from the pre-rewrite baseline, confirming the searched tree
+is untouched and the gap is pure per-call cost, not a change in what's searched.
+`generate_quiescence_turns_from` itself is the named remaining hot spot: it dropped
+2.3x (35,981ns → 15,501ns on the starting position) but is still ~3.9x over its own
+≤4µs target and remains the dominant per-leaf-node cost (called once per regular-search
+leaf node, not per qnode, per the item-9-follow-up fix that moved recursive quiescence
+nodes onto the cheaper `generate_quiescence_recapture_turns` path). Closing the
+remaining gap would mean cutting further into `generate_quiescence_turns_from` itself —
+out of scope for this task, which is measurement and honest guards, not a further
+optimization pass.
 
 The 3.4x from the ablation is the floor, not the ceiling: that experiment deleted the
 work, whereas this accelerates it, so node counts stay at the (lower, better-pruned)
