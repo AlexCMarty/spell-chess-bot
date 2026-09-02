@@ -1,3 +1,6 @@
+#[macro_use]
+pub mod qprof;
+
 pub mod types;
 pub use types::*;
 

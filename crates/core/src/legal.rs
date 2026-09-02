@@ -65,6 +65,11 @@ pub fn apply_move_only(pos: &Position, mv: &PieceMove) -> Position {
     next
 }
 
+/// How many distinct filters `legal_moves` applies to a pseudo-legal move. Pinned by
+/// a static assertion in `spell_delta`, which enumerates all of them; see the mapping
+/// table above the filter chain below.
+pub(crate) const LEGAL_MOVE_FILTERS: usize = 6;
+
 pub fn legal_moves(pos: &Position) -> Vec<PieceMove> {
     let mover = pos.side_to_move;
     let enemy = mover.opposite();
@@ -79,6 +84,30 @@ pub fn legal_moves(pos: &Position) -> Vec<PieceMove> {
     let checker_count = checkers.count();
     let pins = pins_of(pos, king_sq, mover, frozen, jump);
 
+    // FILTER LIST -- keep in step with `spell_delta::freeze_captures`, whose entire
+    // correctness argument is an enumeration of these. Freeze never changes
+    // reachability, so every capture a freeze newly makes legal is a move that was
+    // already pseudo-legal and that one of the six filters below used to reject.
+    // `freeze_captures` either models that filter or declines to `NeedsRescan`:
+    //
+    //   1. enemy-king capture, `after_count <= before_count.max(1)`  -> declined
+    //      (freeze_captures' "mechanism 4" guard)
+    //   2. en passant clone-and-rescan                               -> declined
+    //      (its `pos.en_passant.is_some()` guard)
+    //   3. king move, `king_dest_safe`                               -> MODELLED
+    //      (its mechanism 3)
+    //   4. `checker_count >= 2`                                      -> declined
+    //      (its `ctx.checkers` non-empty guard)
+    //   5. pin ray, plus the live-jump-square clone-and-rescan arm   -> MODELLED
+    //      (its mechanism 2) / declined (its `jump_enemy` guard)
+    //   6. `checker_count == 1`, `evasion_allows`                    -> declined
+    //      (the same `ctx.checkers` guard)
+    //
+    // Changing this list means `LEGAL_MOVE_FILTERS` above no longer matches and
+    // `spell_delta`'s static assertion fails the build. That is a tripwire, not a
+    // proof -- it only fires if you update the count, and the differential batteries
+    // only catch a missed filter when they happen to generate the geometry. Read
+    // `freeze_captures`' doc comment before touching anything here.
     pseudo_legal_moves(pos)
         .into_iter()
         .filter(|mv| {
@@ -535,7 +564,13 @@ fn generate_turns_from(
 /// This alone is what implements "freeze the recapturer, then take"; the
 /// separate, much rarer case of freeze *creating* a capture that wasn't legal
 /// before needs the expensive `legal_moves` scan in `generate_quiescence_from`.
-fn freeze_recapture_turns(pos: &Position, us: Color, baseline: &[PieceMove], frozen: Bitboard) -> Vec<Turn> {
+fn freeze_recapture_turns(
+    pos: &Position,
+    us: Color,
+    baseline: &[PieceMove],
+    frozen: Bitboard,
+    targets: &[Square],
+) -> Vec<Turn> {
     let mut turns = Vec::new();
     if !pos.spells(us).freeze.castable() {
         return turns;
@@ -543,7 +578,7 @@ fn freeze_recapture_turns(pos: &Position, us: Color, baseline: &[PieceMove], fro
     let their_bb = pos.board.color_bb(us.opposite());
     let our_bb = pos.board.color_bb(us);
     let captures: Vec<PieceMove> = baseline.iter().copied().filter(|mv| is_capture(pos, mv)).collect();
-    for sq in crate::spells::relevant_freeze_targets(pos, us, baseline) {
+    for &sq in targets {
         let zone = crate::spells::FREEZE_ZONE[sq.0 as usize];
         let hits_us = zone.minus(frozen).intersect(our_bb);
         let cast = SpellCast { kind: SpellKind::Freeze, square: sq };
@@ -561,76 +596,119 @@ fn freeze_recapture_turns(pos: &Position, us: Color, baseline: &[PieceMove], fro
 }
 
 fn generate_quiescence_from(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn> {
-    let mut turns: Vec<Turn> = baseline
+    crate::qtime!(TOTAL, generate_quiescence_inner(pos, baseline))
+}
+
+/// The body of `generate_quiescence_from`, split out only so `qprof`'s TOTAL timer
+/// can wrap it without the early returns below escaping the timed scope.
+fn generate_quiescence_inner(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn> {
+    let mut turns: Vec<Turn> = crate::qtime!(BASELINE_CAPTURES, baseline
         .iter()
         .copied()
         .filter(|mv| is_capture(pos, mv))
         .map(|mv| Turn { spell: None, mv })
-        .collect();
+        .collect());
 
-    let us = pos.side_to_move;
-    let enemy = us.opposite();
-    let frozen = crate::spells::frozen_bb(pos);
-    let jump = crate::spells::jump_bb(pos);
-    let slider_occ = pos.board.occupancy().minus(jump);
-    let Some(king_sq) = pos.board.king_square(us) else {
-        turns.extend(freeze_recapture_turns(pos, us, baseline, frozen));
+    // One context for the whole node: the `*_may_change_this_ply` guards below and
+    // every `captures_enabled_by_in` call share it, so the guards and the delta can
+    // never be reasoning about different `frozen`/`jump`/`checkers`/`pins` values.
+    let ctx = crate::qtime!(CTX_NEW, crate::spell_delta::NodeContext::new(pos));
+    let us = ctx.us;
+    let enemy = ctx.enemy;
+    let frozen = ctx.frozen;
+    let slider_occ = ctx.slider_occ;
+    // Computed once for the whole node: `freeze_recapture_turns` and the freeze loop
+    // want the same relevance-filtered list for the same `(pos, us, baseline)`, and
+    // rebuilding it for each was 12.6% of this function (qprof, depth 6). Cheap when
+    // freeze is uncastable -- `relevant_freeze_targets` returns empty immediately.
+    let freeze_targets =
+        crate::qtime!(REL_FREEZE_TARGETS, crate::spells::relevant_freeze_targets(pos, us, baseline));
+    let Some(king_sq) = ctx.king_sq else {
+        turns.extend(freeze_recapture_turns(pos, us, baseline, frozen, &freeze_targets));
         return turns;
     };
-    let checkers = crate::attacks::attackers_to(pos, king_sq, enemy, frozen, slider_occ);
-    let pins = pins_of(pos, king_sq, us, frozen, jump);
+    let checkers = ctx.checkers;
+    let pins = &ctx.pins;
 
-    if pos.spells(us).jump.castable() {
-        for sq in crate::spells::jump_targets(pos, us) {
-            if !jump_may_change_this_ply(pos, sq, us, king_sq, frozen, jump, slider_occ, checkers) {
-                continue;
-            }
-            let cast = SpellCast { kind: SpellKind::Jump, square: sq };
-            let mut fast = Vec::new();
-            match crate::spell_delta::captures_enabled_by(pos, cast, baseline, &mut fast) {
-                crate::spell_delta::Delta::Complete => {
-                    for mv in fast {
-                        turns.push(Turn { spell: Some(cast), mv });
-                    }
-                }
-                crate::spell_delta::Delta::NeedsRescan => {
-                    for mv in legal_moves(&position_with_field(pos, cast)) {
-                        if is_capture(pos, &mv) && !in_baseline(baseline, mv) {
-                            turns.push(Turn { spell: Some(cast), mv });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    turns.extend(freeze_recapture_turns(pos, us, baseline, frozen));
-
-    if pos.spells(us).freeze.castable() {
-        let their_bb = pos.board.color_bb(enemy);
-        for sq in crate::spells::relevant_freeze_targets(pos, us, baseline) {
-            let zone = crate::spells::FREEZE_ZONE[sq.0 as usize];
-            let hits_them = zone.minus(frozen).intersect(their_bb);
-            let cast = SpellCast { kind: SpellKind::Freeze, square: sq };
-            if freeze_enemy_affects_this_ply(pos, hits_them, us, king_sq, checkers, &pins, frozen, slider_occ) {
+    crate::qtime!(JUMP_LOOP, {
+        if pos.spells(us).jump.castable() {
+            for sq in crate::spells::jump_targets(pos, us) {
+                crate::qcount!(JUMP_TARGET);
+                // Deliberately no `jump_may_change_this_ply` here. Measured with
+                // qprof at depth 6: the guard cost 198ns per target and let 63.5% of
+                // them through, while `jump_captures` answers "nothing gained" for an
+                // irrelevant target in ~40ns via its `sliders.reach` early-out -- the
+                // filter was dearer than the work it filtered. The guard stays in
+                // `generate_turns_from`, which also has to catch move REMOVALS (a jump
+                // opening an enemy slider onto our own king); this generator only ever
+                // emits captures, so the delta alone is the right filter for it.
+                crate::qcount!(JUMP_GUARD_PASS);
+                let cast = SpellCast { kind: SpellKind::Jump, square: sq };
                 let mut fast = Vec::new();
-                match crate::spell_delta::captures_enabled_by(pos, cast, baseline, &mut fast) {
+                let delta = crate::qtime!(
+                    JUMP_DELTA,
+                    crate::spell_delta::captures_enabled_by_in(&ctx, pos, cast, baseline, &mut fast)
+                );
+                match delta {
                     crate::spell_delta::Delta::Complete => {
                         for mv in fast {
                             turns.push(Turn { spell: Some(cast), mv });
                         }
                     }
                     crate::spell_delta::Delta::NeedsRescan => {
-                        for mv in legal_moves(&position_with_field(pos, cast)) {
-                            if is_capture(pos, &mv) && !in_baseline(baseline, mv) {
+                        crate::qtime!(JUMP_RESCAN, {
+                            for mv in legal_moves(&position_with_field(pos, cast)) {
+                                if is_capture(pos, &mv) && !in_baseline(baseline, mv) {
+                                    turns.push(Turn { spell: Some(cast), mv });
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        }
+    });
+
+    crate::qtime!(
+        FREEZE_RECAP_LOOP,
+        turns.extend(freeze_recapture_turns(pos, us, baseline, frozen, &freeze_targets))
+    );
+
+    crate::qtime!(FREEZE_LOOP, {
+        if pos.spells(us).freeze.castable() {
+            let their_bb = pos.board.color_bb(enemy);
+            for &sq in &freeze_targets {
+                crate::qcount!(FREEZE_TARGET);
+                let zone = crate::spells::FREEZE_ZONE[sq.0 as usize];
+                let hits_them = zone.minus(frozen).intersect(their_bb);
+                let cast = SpellCast { kind: SpellKind::Freeze, square: sq };
+                if freeze_enemy_affects_this_ply(pos, hits_them, us, king_sq, checkers, pins, frozen, slider_occ) {
+                    crate::qcount!(FREEZE_GUARD_PASS);
+                    let mut fast = Vec::new();
+                    let delta = crate::qtime!(
+                        FREEZE_DELTA,
+                        crate::spell_delta::captures_enabled_by_in(&ctx, pos, cast, baseline, &mut fast)
+                    );
+                    match delta {
+                        crate::spell_delta::Delta::Complete => {
+                            for mv in fast {
                                 turns.push(Turn { spell: Some(cast), mv });
                             }
+                        }
+                        crate::spell_delta::Delta::NeedsRescan => {
+                            crate::qtime!(FREEZE_RESCAN, {
+                                for mv in legal_moves(&position_with_field(pos, cast)) {
+                                    if is_capture(pos, &mv) && !in_baseline(baseline, mv) {
+                                        turns.push(Turn { spell: Some(cast), mv });
+                                    }
+                                }
+                            });
                         }
                     }
                 }
             }
         }
-    }
+    });
     turns
 }
 
@@ -657,8 +735,10 @@ pub fn generate_quiescence_recapture_turns(pos: &Position, baseline: &[PieceMove
         .filter(|mv| is_capture(pos, mv))
         .map(|mv| Turn { spell: None, mv })
         .collect();
+    let us = pos.side_to_move;
     let frozen = crate::spells::frozen_bb(pos);
-    turns.extend(freeze_recapture_turns(pos, pos.side_to_move, baseline, frozen));
+    let targets = crate::spells::relevant_freeze_targets(pos, us, baseline);
+    turns.extend(freeze_recapture_turns(pos, us, baseline, frozen, &targets));
     turns
 }
 
