@@ -1056,4 +1056,188 @@ mod tests {
         assert_eq!(captures_enabled_by(&pos, cast, &baseline, &mut out), Delta::NeedsRescan);
         assert!(out.is_empty(), "a declining call must not touch `out`");
     }
+
+    // -----------------------------------------------------------------------
+    // Jump-exposure precompute characterization fixtures. These pin the rule
+    // from the design doc *before* the precompute exists (Task 2 of the
+    // implementation plan): every one of these must already pass against the
+    // pre-precompute `jump_captures`, which computes the same answer via a
+    // fresh `attackers_to` call per target. They exist to catch a regression
+    // in the refactor, not to fix a bug.
+    // -----------------------------------------------------------------------
+
+    /// King d1's file ray is blocked by an enemy knight on d4 (blocker color is
+    /// irrelevant to jump transparency), with a rook behind it on d8 -- jumping
+    /// d4 must reveal exactly that rook as a checker. White's bishop on a1
+    /// independently gains Nf6 through the same jump (its own a1-h8 diagonal
+    /// also passes through d4), which is unrelated to the check and must be
+    /// filtered: only a capture of the checker (d8) is a legal response to
+    /// being in check.
+    #[test]
+    fn jump_exposure_on_a_rook_line_filters_captures_to_the_new_checker() {
+        let mut pos = empty_board();
+        put(&mut pos, "d1", Color::White, PieceKind::King);
+        put(&mut pos, "d4", Color::Black, PieceKind::Knight);
+        put(&mut pos, "d8", Color::Black, PieceKind::Rook);
+        put(&mut pos, "a1", Color::White, PieceKind::Bishop);
+        put(&mut pos, "f6", Color::Black, PieceKind::Knight);
+        put(&mut pos, "h8", Color::Black, PieceKind::King);
+
+        let baseline = legal_moves(&pos);
+        let cast = SpellCast { kind: SpellKind::Jump, square: sq("d4") };
+        let bxf6 = PieceMove::quiet(sq("a1"), sq("f6"));
+        assert!(
+            !rescan_oracle(&pos, cast, &baseline).contains(&bxf6),
+            "fixture is wrong: rescan must filter Bxf6 once jump@d4 lets Rd8 check Kd1",
+        );
+        assert_delta_sound(&pos, cast);
+    }
+
+    /// Same mechanism, diagonal ray: king e1's (-1,+1) diagonal is blocked by a
+    /// knight on c3 with a bishop behind it on a5. White's queen on e5
+    /// independently gains Rxa1 through the same jump (its own diagonal through
+    /// c3 in the *other* direction), which must be filtered the same way.
+    #[test]
+    fn jump_exposure_on_a_bishop_line_filters_captures_to_the_new_checker() {
+        let mut pos = empty_board();
+        put(&mut pos, "e1", Color::White, PieceKind::King);
+        put(&mut pos, "c3", Color::Black, PieceKind::Knight);
+        put(&mut pos, "a5", Color::Black, PieceKind::Bishop);
+        put(&mut pos, "e5", Color::White, PieceKind::Queen);
+        put(&mut pos, "a1", Color::Black, PieceKind::Rook);
+        put(&mut pos, "h8", Color::Black, PieceKind::King);
+
+        let baseline = legal_moves(&pos);
+        let cast = SpellCast { kind: SpellKind::Jump, square: sq("c3") };
+        let qxa1 = PieceMove::quiet(sq("e5"), sq("a1"));
+        assert!(
+            !rescan_oracle(&pos, cast, &baseline).contains(&qxa1),
+            "fixture is wrong: rescan must filter Qxa1 once jump@c3 lets Ba5 check Ke1",
+        );
+        assert_delta_sound(&pos, cast);
+    }
+
+    /// King d1 is already in check from a knight on b2 (unrelated to any spell).
+    /// jump@d4 additionally exposes Rd8 down the file -- turning a single check
+    /// into a double check, where only king moves are legal. `jump_captures`
+    /// must decline rather than reason about double check itself.
+    #[test]
+    fn jump_exposure_combined_with_a_pre_existing_checker_declines() {
+        let mut pos = empty_board();
+        put(&mut pos, "d1", Color::White, PieceKind::King);
+        put(&mut pos, "b2", Color::Black, PieceKind::Knight);
+        put(&mut pos, "d4", Color::Black, PieceKind::Knight);
+        put(&mut pos, "d8", Color::Black, PieceKind::Rook);
+        put(&mut pos, "h8", Color::Black, PieceKind::King);
+
+        let cast = SpellCast { kind: SpellKind::Jump, square: sq("d4") };
+        let hypothetical = crate::legal::position_with_field(&pos, cast);
+        let hyp_moves = legal_moves(&hypothetical);
+        assert!(
+            !hyp_moves.is_empty() && hyp_moves.iter().all(|mv| mv.from == sq("d1")),
+            "fixture is wrong: jump@d4 must leave only king moves (double check), got {hyp_moves:?}",
+        );
+
+        let baseline = legal_moves(&pos);
+        let mut out = Vec::new();
+        assert_eq!(
+            captures_enabled_by(&pos, cast, &baseline, &mut out),
+            Delta::NeedsRescan,
+            "a jump that creates a double check must decline, not guess",
+        );
+        assert!(out.is_empty(), "a declining call must not touch `out`");
+    }
+
+    /// Same geometry as the rook-line fixture, but the piece behind the
+    /// blocker is a Bishop -- the wrong kind for a straight-line ray. It must
+    /// not be treated as a newly-revealed checker, so the unrelated Bxf6
+    /// capture stays available.
+    #[test]
+    fn jump_exposure_requires_the_revealed_piece_kind_to_match_the_ray() {
+        let mut pos = empty_board();
+        put(&mut pos, "d1", Color::White, PieceKind::King);
+        put(&mut pos, "d4", Color::Black, PieceKind::Knight);
+        put(&mut pos, "d8", Color::Black, PieceKind::Bishop);
+        put(&mut pos, "a1", Color::White, PieceKind::Bishop);
+        put(&mut pos, "f6", Color::Black, PieceKind::Knight);
+        put(&mut pos, "h8", Color::Black, PieceKind::King);
+
+        let baseline = legal_moves(&pos);
+        let cast = SpellCast { kind: SpellKind::Jump, square: sq("d4") };
+        let bxf6 = PieceMove::quiet(sq("a1"), sq("f6"));
+        assert!(
+            rescan_oracle(&pos, cast, &baseline).contains(&bxf6),
+            "fixture is wrong: a bishop on d8 cannot check Kd1 down the file, Bxf6 must stay legal",
+        );
+        assert_delta_sound(&pos, cast);
+    }
+
+    /// Same geometry as the rook-line fixture, but Rd8 is frozen by a
+    /// pre-existing field. A frozen piece "exerts no control at all"
+    /// (rules/30-freeze.md), so it must not be treated as a newly-revealed
+    /// checker even though it is the right kind and color.
+    #[test]
+    fn a_frozen_revealed_piece_does_not_count_as_exposure() {
+        let mut pos = empty_board();
+        put(&mut pos, "d1", Color::White, PieceKind::King);
+        put(&mut pos, "d4", Color::Black, PieceKind::Knight);
+        put(&mut pos, "d8", Color::Black, PieceKind::Rook);
+        put(&mut pos, "a1", Color::White, PieceKind::Bishop);
+        put(&mut pos, "f6", Color::Black, PieceKind::Knight);
+        put(&mut pos, "h8", Color::Black, PieceKind::King);
+        add_field(&mut pos, "d8", Color::White, SpellKind::Freeze);
+
+        let baseline = legal_moves(&pos);
+        let cast = SpellCast { kind: SpellKind::Jump, square: sq("d4") };
+        let bxf6 = PieceMove::quiet(sq("a1"), sq("f6"));
+        assert!(
+            rescan_oracle(&pos, cast, &baseline).contains(&bxf6),
+            "fixture is wrong: a frozen Rd8 cannot check Kd1, Bxf6 must stay legal",
+        );
+        assert_delta_sound(&pos, cast);
+    }
+
+    /// Same geometry again, but Rd8 is White's own piece, not an enemy's. Only
+    /// an enemy piece can check our king.
+    #[test]
+    fn an_own_colored_revealed_piece_does_not_count_as_exposure() {
+        let mut pos = empty_board();
+        put(&mut pos, "d1", Color::White, PieceKind::King);
+        put(&mut pos, "d4", Color::Black, PieceKind::Knight);
+        put(&mut pos, "d8", Color::White, PieceKind::Rook);
+        put(&mut pos, "a1", Color::White, PieceKind::Bishop);
+        put(&mut pos, "f6", Color::Black, PieceKind::Knight);
+        put(&mut pos, "h8", Color::Black, PieceKind::King);
+
+        let baseline = legal_moves(&pos);
+        let cast = SpellCast { kind: SpellKind::Jump, square: sq("d4") };
+        let bxf6 = PieceMove::quiet(sq("a1"), sq("f6"));
+        assert!(
+            rescan_oracle(&pos, cast, &baseline).contains(&bxf6),
+            "fixture is wrong: White's own Rd8 cannot check Kd1, Bxf6 must stay legal",
+        );
+        assert_delta_sound(&pos, cast);
+    }
+
+    /// Same geometry with d8 empty entirely -- the king's ray runs off the
+    /// board with only one blocker (d4) and nothing behind it. Must not panic
+    /// and must not treat d4 as exposed.
+    #[test]
+    fn a_ray_with_no_second_blocker_creates_no_exposure() {
+        let mut pos = empty_board();
+        put(&mut pos, "d1", Color::White, PieceKind::King);
+        put(&mut pos, "d4", Color::Black, PieceKind::Knight);
+        put(&mut pos, "a1", Color::White, PieceKind::Bishop);
+        put(&mut pos, "f6", Color::Black, PieceKind::Knight);
+        put(&mut pos, "h8", Color::Black, PieceKind::King);
+
+        let baseline = legal_moves(&pos);
+        let cast = SpellCast { kind: SpellKind::Jump, square: sq("d4") };
+        let bxf6 = PieceMove::quiet(sq("a1"), sq("f6"));
+        assert!(
+            rescan_oracle(&pos, cast, &baseline).contains(&bxf6),
+            "fixture is wrong: with nothing behind d4, Bxf6 must stay legal",
+        );
+        assert_delta_sound(&pos, cast);
+    }
 }
