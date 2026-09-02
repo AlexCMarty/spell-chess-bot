@@ -79,41 +79,11 @@ fn sorted(moves: &[PieceMove]) -> Vec<(u8, u8, u8, bool, bool)> {
     v
 }
 
+/// The walk-from-start battery, checked for set *and* order. `freeze_targets` /
+/// `jump_targets` both return empty when the spell is not castable, so iterating
+/// them is already the "skip uncastable positions" filter this used to spell out.
 fn check_kind(kind: SpellKind) -> (u32, u32) {
-    let (mut complete, mut declined) = (0u32, 0u32);
-    for pos in battery() {
-        let us = pos.side_to_move;
-        if !match kind {
-            SpellKind::Freeze => pos.spells(us).freeze.castable(),
-            SpellKind::Jump => pos.spells(us).jump.castable(),
-        } {
-            continue;
-        }
-        let baseline = legal_moves(&pos);
-        let targets = match kind {
-            SpellKind::Freeze => spells::freeze_targets(&pos, us),
-            SpellKind::Jump => spells::jump_targets(&pos, us),
-        };
-        for square in targets {
-            let cast = SpellCast { kind, square };
-            let mut fast = Vec::new();
-            match captures_enabled_by(&pos, cast, &baseline, &mut fast) {
-                Delta::NeedsRescan => {
-                    declined += 1;
-                    assert!(fast.is_empty(), "a declining call must not touch `out`");
-                }
-                Delta::Complete => {
-                    complete += 1;
-                    assert_eq!(
-                        sorted(&fast),
-                        sorted(&rescan_oracle(&pos, cast, &baseline)),
-                        "delta disagreed with rescan for {cast:?}",
-                    );
-                }
-            }
-        }
-    }
-    (complete, declined)
+    check_kind_over_ordered(kind, &battery())
 }
 
 /// The walk-from-start battery above almost never produces the open lines, live
@@ -172,38 +142,6 @@ fn sparse_random_positions(seed: u64, count: usize) -> Vec<Position> {
         out.push(pos);
     }
     out
-}
-
-fn check_kind_over(kind: SpellKind, positions: &[Position]) -> (u32, u32) {
-    let (mut complete, mut declined) = (0u32, 0u32);
-    for pos in positions {
-        let us = pos.side_to_move;
-        let baseline = legal_moves(pos);
-        let targets = match kind {
-            SpellKind::Freeze => spells::freeze_targets(pos, us),
-            SpellKind::Jump => spells::jump_targets(pos, us),
-        };
-        for square in targets {
-            let cast = SpellCast { kind, square };
-            let mut fast = Vec::new();
-            match captures_enabled_by(pos, cast, &baseline, &mut fast) {
-                Delta::NeedsRescan => {
-                    declined += 1;
-                    assert!(fast.is_empty(), "a declining call must not touch `out`");
-                }
-                Delta::Complete => {
-                    complete += 1;
-                    assert_eq!(
-                        sorted(&fast),
-                        sorted(&rescan_oracle(pos, cast, &baseline)),
-                        "delta disagreed with rescan for {cast:?} on {:?}",
-                        pos.board,
-                    );
-                }
-            }
-        }
-    }
-    (complete, declined)
 }
 
 fn adjacent(a: Square, b: Square) -> bool {
@@ -294,7 +232,7 @@ fn king_tangle_positions(seed: u64, count: usize) -> Vec<Position> {
 #[test]
 fn freeze_delta_matches_the_rescan_oracle_on_king_tangle_positions() {
     let positions = king_tangle_positions(0xBADCAFE, 400);
-    let (complete, declined) = check_kind_over(SpellKind::Freeze, &positions);
+    let (complete, declined) = check_kind_over_ordered(SpellKind::Freeze, &positions);
     println!("freeze (king tangle): {complete} complete, {declined} declined");
     assert!(complete > 0, "freeze delta never returned Complete on the king-tangle battery");
 }
@@ -302,7 +240,7 @@ fn freeze_delta_matches_the_rescan_oracle_on_king_tangle_positions() {
 #[test]
 fn jump_delta_matches_the_rescan_oracle_on_king_tangle_positions() {
     let positions = king_tangle_positions(0x1CEB00DA, 400);
-    let (complete, declined) = check_kind_over(SpellKind::Jump, &positions);
+    let (complete, declined) = check_kind_over_ordered(SpellKind::Jump, &positions);
     println!("jump (king tangle): {complete} complete, {declined} declined");
     assert!(complete > 0, "jump delta never returned Complete on the king-tangle battery");
 }
@@ -310,7 +248,7 @@ fn jump_delta_matches_the_rescan_oracle_on_king_tangle_positions() {
 #[test]
 fn freeze_delta_matches_the_rescan_oracle_on_sparse_random_positions() {
     let positions = sparse_random_positions(0xC0FFEE, 400);
-    let (complete, declined) = check_kind_over(SpellKind::Freeze, &positions);
+    let (complete, declined) = check_kind_over_ordered(SpellKind::Freeze, &positions);
     println!("freeze (sparse): {complete} complete, {declined} declined");
     assert!(complete > 0, "freeze delta never returned Complete on the sparse battery");
 }
@@ -318,7 +256,7 @@ fn freeze_delta_matches_the_rescan_oracle_on_sparse_random_positions() {
 #[test]
 fn jump_delta_matches_the_rescan_oracle_on_sparse_random_positions() {
     let positions = sparse_random_positions(0x5EED, 400);
-    let (complete, declined) = check_kind_over(SpellKind::Jump, &positions);
+    let (complete, declined) = check_kind_over_ordered(SpellKind::Jump, &positions);
     println!("jump (sparse): {complete} complete, {declined} declined");
     assert!(complete > 0, "jump delta never returned Complete on the sparse battery");
 }
@@ -339,8 +277,9 @@ fn freeze_delta_matches_the_rescan_oracle() {
 // ---------------------------------------------------------------------------
 // Emission ORDER.
 //
-// Everything above compares sorted multisets, which is not the whole contract.
-// `generate_quiescence_from` pushes the delta's moves into the turn list in
+// Every battery in this file -- the ones above and the ones below -- goes through
+// `check_kind_over_ordered`, because comparing sorted multisets is not the whole
+// contract. `generate_quiescence_from` pushes the delta's moves into the turn list in
 // emission order, and neither `dedup_captures` nor the quiescence loop sorts
 // before consuming them -- so two answers with the same set but a different
 // sequence make the search try captures in a different order, changing
@@ -359,8 +298,11 @@ fn raw(moves: &[PieceMove]) -> Vec<(u8, u8, u8, bool, bool)> {
         .collect()
 }
 
-/// Like `check_kind_over`, but checks the set *and then* the order, so a set
-/// disagreement and an order disagreement fail with different messages.
+/// The one differential checker every battery in this file runs through: it checks
+/// the set *and then* the order, so a set disagreement and an order disagreement
+/// fail with different messages. Order is checked second on purpose -- a set
+/// mismatch would also show up as an order mismatch, and the set message is the
+/// more useful one.
 fn check_kind_over_ordered(kind: SpellKind, positions: &[Position]) -> (u32, u32) {
     let (mut complete, mut declined) = (0u32, 0u32);
     for pos in positions {

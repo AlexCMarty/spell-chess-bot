@@ -7,7 +7,7 @@
 use crate::attacks::attackers_to;
 use crate::bitboard::Bitboard;
 use crate::board::Board;
-use crate::legal::{in_baseline, pin_ray, pins_of, SpellCast};
+use crate::legal::{in_baseline, pin_ray, pins_of, PinMap, SpellCast};
 use crate::movegen::PieceMove;
 use crate::position::{Position, SpellKind};
 use crate::types::{Color, PieceKind, Square};
@@ -19,6 +19,109 @@ pub enum Delta {
     Complete,
     /// The fast path declined. The caller must run the rescan; `out` is untouched.
     NeedsRescan,
+}
+
+/// The maximum unfrozen sliders one side can have. A legal position tops out at 15
+/// (16 pieces, one of them the king); `slider_scan` records the true count and
+/// declines above this, which only a hand-built test board can reach.
+const MAX_SLIDERS: usize = 16;
+
+/// Our unfrozen sliders and the squares each attacks under the node's *current*
+/// field. `jump_captures` diffs its post-jump attack set against these, and none of
+/// it depends on which square is jumped -- so it is walked once per node rather than
+/// once per jump target.
+struct SliderScan {
+    count: usize,
+    items: [(Square, PieceKind, Bitboard); MAX_SLIDERS],
+    /// The union of every recorded slider's attack set. A jump can only ever extend
+    /// a ray *past* the jumped square, so a square outside this union is one no ray
+    /// of ours reaches at all -- and `jump_captures` can answer "nothing gained" for
+    /// it without walking pins. Empty when the scan overflowed.
+    reach: Bitboard,
+}
+
+impl SliderScan {
+    fn recorded(&self) -> Option<&[(Square, PieceKind, Bitboard)]> {
+        (self.count <= MAX_SLIDERS).then(|| &self.items[..self.count])
+    }
+}
+
+fn slider_scan(board: &Board, us: Color, frozen: Bitboard, slider_occ: Bitboard) -> SliderScan {
+    let bb = our_sliders(board, us, frozen);
+    let mut scan = SliderScan {
+        count: bb.count() as usize,
+        items: [(Square(0), PieceKind::Pawn, Bitboard::EMPTY); MAX_SLIDERS],
+        reach: Bitboard::EMPTY,
+    };
+    if scan.count <= MAX_SLIDERS {
+        for (slot, p) in scan.items.iter_mut().zip(bb.iter()) {
+            let kind = board.get(p).expect("slider bitboard square is occupied").kind;
+            *slot = (p, kind, slider_attacks(kind, p, slider_occ));
+            scan.reach = scan.reach.union(slot.2);
+        }
+    }
+    scan
+}
+
+/// Everything the delta needs that depends on the position but not on the cast.
+/// `generate_quiescence_from` builds one per node and hands it to every cast it
+/// tries. Before this existed each cast rebuilt all of it: a node with 30 freeze
+/// targets recomputed `checkers` and a 520-byte `PinMap` thirty times over, and one
+/// with 30 jump targets re-walked every one of our sliders' rays thirty times.
+///
+/// `generate_quiescence_from` also reads its own `frozen`/`jump`/`slider_occ`/
+/// `checkers`/`pins` off this struct, so each value has exactly one computation site
+/// and the delta cannot silently disagree with the `*_may_change_this_ply` guards
+/// that decide whether to call it in the first place.
+pub(crate) struct NodeContext {
+    pub(crate) us: Color,
+    pub(crate) enemy: Color,
+    /// `None` only on a kingless board, which every path below declines on.
+    pub(crate) king_sq: Option<Square>,
+    pub(crate) frozen: Bitboard,
+    pub(crate) jump: Bitboard,
+    /// Occupancy with live jump squares removed, so slider rays run through them.
+    pub(crate) slider_occ: Bitboard,
+    pub(crate) enemy_bb: Bitboard,
+    /// Attackers of our king under the current field; empty when we have no king.
+    /// This is `freeze_captures`' `checkers_before`.
+    pub(crate) checkers: Bitboard,
+    /// Pins on our king under the current field -- `freeze_captures`' `pins_before`.
+    pub(crate) pins: PinMap,
+    sliders: SliderScan,
+}
+
+impl NodeContext {
+    pub(crate) fn new(pos: &Position) -> NodeContext {
+        let us = pos.side_to_move;
+        let enemy = us.opposite();
+        let frozen = crate::spells::frozen_bb(pos);
+        let jump = crate::spells::jump_bb(pos);
+        let slider_occ = pos.board.occupancy().minus(jump);
+        let king_sq = pos.board.king_square(us);
+        let (checkers, pins) = match king_sq {
+            Some(k) => (
+                attackers_to(pos, k, enemy, frozen, slider_occ),
+                pins_of(pos, k, us, frozen, jump),
+            ),
+            None => (
+                Bitboard::EMPTY,
+                PinMap { pinned: Bitboard::EMPTY, rays: [Bitboard::EMPTY; 64] },
+            ),
+        };
+        NodeContext {
+            us,
+            enemy,
+            king_sq,
+            frozen,
+            jump,
+            slider_occ,
+            enemy_bb: pos.board.color_bb(enemy),
+            checkers,
+            pins,
+            sliders: slider_scan(&pos.board, us, frozen, slider_occ),
+        }
+    }
 }
 
 /// Captures that `cast` newly makes legal for `pos.side_to_move`, excluding
@@ -39,10 +142,24 @@ pub fn captures_enabled_by(
     baseline: &[PieceMove],
     out: &mut Vec<PieceMove>,
 ) -> Delta {
+    captures_enabled_by_in(&NodeContext::new(pos), pos, cast, baseline, out)
+}
+
+/// `captures_enabled_by` for a caller that is trying several casts against the same
+/// position and has already built the `NodeContext`. `ctx` MUST be
+/// `NodeContext::new(pos)` for this `pos`; passing a stale one is a correctness bug
+/// the type system does not catch.
+pub(crate) fn captures_enabled_by_in(
+    ctx: &NodeContext,
+    pos: &Position,
+    cast: SpellCast,
+    baseline: &[PieceMove],
+    out: &mut Vec<PieceMove>,
+) -> Delta {
     let start_len = out.len();
     let delta = match cast.kind {
-        SpellKind::Jump => jump_captures(pos, cast.square, baseline, out),
-        SpellKind::Freeze => freeze_captures(pos, cast.square, baseline, out),
+        SpellKind::Jump => jump_captures(ctx, pos, cast.square, baseline, out),
+        SpellKind::Freeze => freeze_captures(ctx, pos, cast.square, baseline, out),
     };
     if delta == Delta::NeedsRescan {
         out.truncate(start_len);
@@ -75,27 +192,27 @@ fn our_sliders(board: &Board, us: Color, frozen: Bitboard) -> Bitboard {
 /// jump newly enables for us are exactly the enemy-occupied squares our sliders
 /// attack once the jumped square stops blocking.
 fn jump_captures(
+    ctx: &NodeContext,
     pos: &Position,
     s: Square,
     baseline: &[PieceMove],
     out: &mut Vec<PieceMove>,
 ) -> Delta {
-    let us = pos.side_to_move;
-    let enemy = us.opposite();
-    let Some(king_sq) = pos.board.king_square(us) else {
+    let Some(king_sq) = ctx.king_sq else {
+        return Delta::NeedsRescan;
+    };
+    let Some(sliders) = ctx.sliders.recorded() else {
         return Delta::NeedsRescan;
     };
 
-    let frozen = crate::spells::frozen_bb(pos);
-    let jump_before = crate::spells::jump_bb(pos);
-    let occ = pos.board.occupancy();
-    let slider_occ_before = occ.minus(jump_before);
-    let jump_after = jump_before.with(s);
-    let slider_occ_after = occ.minus(jump_after);
+    let jump_after = ctx.jump.with(s);
+    // Equal to `occupancy().minus(jump_after)`: `ctx.slider_occ` already has every
+    // previously live jump square subtracted, so `s` is the only one left to remove.
+    let slider_occ_after = ctx.slider_occ.without(s);
 
     // Jump is symmetric: it can open an enemy slider onto our own king. Recompute
     // our king's check/pin context under the field rather than assuming it holds.
-    let checkers_after = attackers_to(pos, king_sq, enemy, frozen, slider_occ_after);
+    let checkers_after = attackers_to(pos, king_sq, ctx.enemy, ctx.frozen, slider_occ_after);
     if checkers_after.count() > 1 {
         // Double check: only king moves are legal, and a king move is never one of
         // the slider captures below. Decline rather than reason about it.
@@ -107,15 +224,32 @@ fn jump_captures(
         // ends up with at least two attackers under the new field.
         return Delta::NeedsRescan;
     }
-    let single_checker = checkers_after.iter().next();
-    let pins_after = pins_of(pos, king_sq, us, frozen, jump_after);
-    let enemy_bb = pos.board.color_bb(enemy);
 
-    for p in our_sliders(&pos.board, us, frozen).iter() {
-        let kind = pos.board.get(p).expect("slider bitboard square is occupied").kind;
-        let gained = slider_attacks(kind, p, slider_occ_after)
-            .minus(slider_attacks(kind, p, slider_occ_before))
-            .intersect(enemy_bb);
+    // No ray of ours reaches `s`, so no ray of ours grows when `s` turns transparent
+    // and `gained` is empty for every slider below -- the loop would emit nothing and
+    // take none of its exits. Returning here instead of falling through skips the
+    // `pins_of` walk, which is the expensive part of this function and is read only
+    // inside that loop. This has to come *after* the double-check decline above:
+    // that one is about a capture of the ENEMY king becoming legal, which has nothing
+    // to do with where our own sliders point.
+    if !ctx.sliders.reach.contains(s) {
+        return Delta::Complete;
+    }
+
+    let single_checker = checkers_after.iter().next();
+    let pins_after = pins_of(pos, king_sq, ctx.us, ctx.frozen, jump_after);
+
+    for &(p, kind, before) in sliders {
+        // A jump only ever extends a ray *past* `s`. A slider that did not already
+        // reach `s` stops at an earlier blocker either way, so its attack set is
+        // unchanged and `gained` would come out empty -- and every `NeedsRescan`
+        // exit in this loop sits inside the `gained` walk, so skipping is exactly
+        // equivalent to running the body, not an approximation of it.
+        if !before.contains(s) {
+            continue;
+        }
+        let gained =
+            slider_attacks(kind, p, slider_occ_after).minus(before).intersect(ctx.enemy_bb);
         for t in gained.iter() {
             // King capture legality is the subtlest rule in the engine (the
             // attacker_count comparison in legal_moves); do not duplicate it here.
@@ -144,9 +278,16 @@ fn jump_captures(
                 }
             }
             let mv = PieceMove::quiet(p, t);
-            if in_baseline(baseline, mv) {
-                continue;
-            }
+            // Provably dead, so it is a debug-only check rather than a linear scan
+            // on the hot path: `t` came out of `gained`, i.e. `p` did *not* attack
+            // `t` before the jump, so no baseline move can run from `p` to `t`.
+            // (`freeze_captures`' `in_baseline` calls below are live by contrast --
+            // freeze leaves reachability alone, so its candidates were already
+            // pseudo-legal and may well have been legal too.)
+            debug_assert!(
+                !in_baseline(baseline, mv),
+                "jump delta re-emitted baseline move {mv:?}: `gained` was not disjoint from baseline",
+            );
             out.push(mv);
         }
     }
@@ -189,17 +330,23 @@ fn piece_capture_targets(pos: &Position, from: Square, slider_occ: Bitboard, ene
 /// 4. `after_count <= before_count.max(1)` for capturing the enemy king -- declined
 ///    below.
 ///
-/// That list is the spec, and nothing links it mechanically to `legal_moves`: anyone
-/// adding a filter there must revisit it here.
+/// That list is the spec. The `const _` assertion just below pins `legal_moves`'
+/// filter count so that adding or removing a filter there breaks this build -- a
+/// tripwire, not a proof, since it depends on whoever edits `legal_moves` updating
+/// the count the comment there tells them to update.
+const _: () = assert!(
+    crate::legal::LEGAL_MOVE_FILTERS == 6,
+    "legal_moves' filter list changed -- revisit freeze_captures' four-mechanism enumeration",
+);
+
 fn freeze_captures(
+    ctx: &NodeContext,
     pos: &Position,
     s: Square,
     baseline: &[PieceMove],
     out: &mut Vec<PieceMove>,
 ) -> Delta {
-    let us = pos.side_to_move;
-    let enemy = us.opposite();
-    let Some(king_sq) = pos.board.king_square(us) else {
+    let Some(king_sq) = ctx.king_sq else {
         return Delta::NeedsRescan;
     };
     // See the sort just before the final `Delta::Complete`: this call's own slice of
@@ -207,10 +354,10 @@ fn freeze_captures(
     // passes that do not interleave.
     let out_start = out.len();
 
-    let frozen_before = crate::spells::frozen_bb(pos);
+    let frozen_before = ctx.frozen;
     let zone = crate::spells::FREEZE_ZONE[s.0 as usize];
     let frozen_after = frozen_before.union(zone);
-    let enemy_bb = pos.board.color_bb(enemy);
+    let enemy_bb = ctx.enemy_bb;
     let newly_frozen_them = frozen_after.minus(frozen_before).intersect(enemy_bb);
 
     // Freezing only our own pieces (or nothing) strictly *removes* enemy-free
@@ -226,17 +373,15 @@ fn freeze_captures(
         return Delta::NeedsRescan;
     }
 
-    let jump = crate::spells::jump_bb(pos);
-    let occ = pos.board.occupancy();
-    let slider_occ = occ.minus(jump);
+    let jump = ctx.jump;
+    let slider_occ = ctx.slider_occ;
 
-    let checkers_before = crate::attacks::attackers_to(pos, king_sq, enemy, frozen_before, slider_occ);
-    if !checkers_before.is_empty() {
+    if !ctx.checkers.is_empty() {
         // Check dispelled (or still live): the newly legal set is essentially the
         // whole position, which is not a cheap delta. This is what the escape
         // hatch exists for.
         //
-        // Testing `checkers_before` alone is exhaustive; there is deliberately no
+        // Testing `ctx.checkers` (the pre-cast checkers) alone is exhaustive; there is no
         // `checkers_after` term. A freeze can never *add* a checker: `attackers_to`
         // is monotonically decreasing in `frozen` (attacks.rs walks `unfrozen()`),
         // `frozen_after` is a superset of `frozen_before`, and a freeze leaves
@@ -265,14 +410,14 @@ fn freeze_captures(
     // (the mechanism-4 guard above already declined)"): delete this and mechanism 2
     // would emit enemy-king captures whose legality rests on reasoning no longer
     // encoded anywhere in the code, true by luck rather than by construction.
-    if let Some(their_king) = pos.board.king_square(enemy) {
-        if !crate::attacks::attackers_to(pos, their_king, us, frozen_after, slider_occ).is_empty() {
+    if let Some(their_king) = pos.board.king_square(ctx.enemy) {
+        if !crate::attacks::attackers_to(pos, their_king, ctx.us, frozen_after, slider_occ).is_empty() {
             return Delta::NeedsRescan;
         }
     }
 
-    let pins_before = pins_of(pos, king_sq, us, frozen_before, jump);
-    let pins_after = pins_of(pos, king_sq, us, frozen_after, jump);
+    let pins_before = &ctx.pins;
+    let pins_after = pins_of(pos, king_sq, ctx.us, frozen_after, jump);
 
     // A piece that stays pinned, with the very same ray, can still gain a capture --
     // so neither `released` nor a ray comparison is enough on its own.
@@ -378,7 +523,7 @@ fn freeze_captures(
             if in_baseline(baseline, mv) {
                 continue;
             }
-            if crate::legal::king_dest_safe(&hypo, king_sq, t, enemy) {
+            if crate::legal::king_dest_safe(&hypo, king_sq, t, ctx.enemy) {
                 out.push(mv);
             }
         }
@@ -510,7 +655,8 @@ mod tests {
         // White box, so this test cannot silently go vacuous again: the inner
         // mechanism really does leave a candidate behind when it declines.
         let mut raw = Vec::new();
-        assert_eq!(freeze_captures(&pos, sq("f7"), &baseline, &mut raw), Delta::NeedsRescan);
+        let ctx = NodeContext::new(&pos);
+        assert_eq!(freeze_captures(&ctx, &pos, sq("f7"), &baseline, &mut raw), Delta::NeedsRescan);
         assert_eq!(raw, vec![rxa5], "fixture is wrong: the decline must follow a push");
 
         // ...and the public entry point hands the caller its buffer back untouched.

@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use spellchess_core::{apply_turn, generate_quiescence_recapture_turns, generate_quiescence_turns_from, generate_search_spell_turns, generate_search_turns, legal_moves, Color, PieceKind, Position, Turn};
 use crate::eval::{evaluate, piece_value};
@@ -65,8 +66,18 @@ fn tt_probe_score(score: i32, ply: u32) -> i32 {
 }
 
 struct SearchState<'a> {
-    tt: &'a mut TranspositionTable,
+    /// Shared, not owned: under Lazy-SMP every thread reads and writes this one table,
+    /// and that sharing is the entire mechanism by which the helpers speed the main
+    /// thread up. See `tt::TranspositionTable`'s sharding note.
+    tt: &'a TranspositionTable,
     deadline: Option<Instant>,
+    /// Set by the main thread when it has its answer, so helpers unwind instead of
+    /// running their own iterative deepening to the bitter end. `None` for a search
+    /// with no helpers to cancel.
+    stop: Option<&'a AtomicBool>,
+    /// The best turn found at ply 0 in the iteration currently running, recorded as
+    /// it is found. `iterate` clears it before each attempt and reads it after.
+    root_best: Option<(Turn, i32)>,
     killers: &'a mut KillerTable,
     history: &'a mut HistoryTable,
     nodes: u64,
@@ -90,6 +101,9 @@ fn is_pv_window(alpha: i32, beta: i32) -> bool {
 }
 
 fn timed_out(state: &SearchState<'_>) -> bool {
+    if state.stop.is_some_and(|s| s.load(Ordering::Relaxed)) {
+        return true;
+    }
     matches!(state.deadline, Some(dl) if Instant::now() >= dl)
 }
 
@@ -195,6 +209,16 @@ fn search_children(
         if score > *best {
             *best = score;
             *best_turn = Some(turn);
+            if ply == 0 {
+                // Recorded here rather than read back out of the transposition table
+                // after the search returns. The root entry is not private: under
+                // Lazy-SMP another thread can evict it between the search and the
+                // read, and even single-threaded a different position sharing the
+                // slot can. Either way the old code silently kept the *previous*
+                // iteration's move and score -- which is what made a 4-thread depth-6
+                // search report eval 0 where 1 thread reported 56.
+                state.root_best = Some((turn, score));
+            }
         }
         if *best > *alpha {
             *alpha = *best;
@@ -215,12 +239,14 @@ fn search_children(
 /// spent reaching it (e.g. `best_turn` plays one ply itself before calling this,
 /// so it passes `1`) so mate scores stay offset consistently with `search()`.
 pub fn negamax(pos: &Position, depth: u32, ply: u32) -> i32 {
-    let mut tt = TranspositionTable::new();
+    let tt = TranspositionTable::new();
     let mut killers = KillerTable::new(depth + ply + KILLER_PLY_SLACK);
     let mut history = HistoryTable::new();
     let mut state = SearchState {
-        tt: &mut tt,
+        tt: &tt,
         deadline: None,
+        stop: None,
+        root_best: None,
         killers: &mut killers,
         history: &mut history,
         nodes: 0,
@@ -260,9 +286,15 @@ fn alphabeta(
     let is_pv = is_pv_window(alpha, beta);
     let in_check = spellchess_core::is_square_attacked(pos, king_sq, pos.side_to_move.opposite());
     let key = hash_position(pos);
-    let tt_entry = state.tt.get(key).copied();
+    let tt_entry = state.tt.get(key);
     if let Some(entry) = tt_entry {
-        if entry.depth >= depth {
+        // Never cut off at the root. The entry is still used for move ordering below,
+        // but returning here would leave the iteration with no root move of its own
+        // and `iterate` would keep the previous depth's answer. Single-threaded this
+        // never fired -- the root entry from iteration d-1 is shallower than d -- but
+        // a Lazy-SMP helper that reaches depth d first writes an entry that does, and
+        // a 4-thread depth-6 search then silently reported its depth-5 move.
+        if ply > 0 && entry.depth >= depth {
             let score = tt_probe_score(entry.score, ply);
             match entry.bound {
                 Bound::Exact => {
@@ -525,37 +557,23 @@ fn dump_profile(label: &str, start: Instant, state: &SearchState<'_>) {
     );
 }
 
-pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
-    let start = Instant::now();
-    let deadline = match budget {
-        Budget::Time(limit) => Some(start + limit),
-        Budget::Depth(_) => None,
-    };
-    let max_depth = match budget {
-        Budget::Depth(d) => d,
-        Budget::Time(_) => 64,
-    };
-    let mut tt = TranspositionTable::new();
-    let mut killers = KillerTable::new(max_depth + KILLER_PLY_SLACK);
-    let mut history = HistoryTable::new();
-    let mut state = SearchState {
-        tt: &mut tt,
-        deadline,
-        killers: &mut killers,
-        history: &mut history,
-        nodes: 0,
-        qnodes: 0,
-        spell_gens: 0,
-        tt_hits: 0,
-        nmp_cutoffs: 0,
-        no_spell_cutoffs: 0,
-    };
+/// One iterative-deepening loop over the shared table. Every search thread runs this;
+/// `start_depth` is the only thing that differs between them, so the helpers do not
+/// walk the tree in lockstep and the table picks up their bounds and best moves.
+/// Returns the best turn this thread proved, which only the main thread's caller uses.
+fn iterate(
+    pos: &Position,
+    max_depth: u32,
+    start_depth: u32,
+    aspiration: bool,
+    state: &mut SearchState<'_>,
+) -> Option<(Turn, i32)> {
     let mut best: Option<(Turn, i32)> = None;
     let mut last_score: Option<i32> = None;
     let root_key = hash_position(pos);
 
-    for depth in 1..=max_depth {
-        if timed_out(&state) {
+    for depth in start_depth..=max_depth {
+        if timed_out(state) {
             break;
         }
         let baseline = legal_moves(pos);
@@ -564,13 +582,23 @@ pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
         }
         let mut alpha = i32::MIN + 1;
         let mut beta = i32::MAX - 1;
-        if let Some(score) = last_score {
-            alpha = score.saturating_sub(ASPIRATION).max(i32::MIN + 1);
-            beta = score.saturating_add(ASPIRATION).min(i32::MAX - 1);
+        // Helpers search full windows. A narrow aspiration window is only sound for
+        // the thread that chose it: the Lower/Upper bounds it produces are relative to
+        // that window, and every thread stores them into the one shared table. Letting
+        // three helpers each narrow around their own running score is what made a
+        // 4-thread depth-6 search swing between 2.4s and 26.5s.
+        if aspiration {
+            if let Some(score) = last_score {
+                alpha = score.saturating_sub(ASPIRATION).max(i32::MIN + 1);
+                beta = score.saturating_add(ASPIRATION).min(i32::MAX - 1);
+            }
         }
         let mut complete = true;
         loop {
-            match alphabeta(pos, depth, alpha, beta, 0, &mut state) {
+            // Cleared per attempt, so a fail-low that finds no root move leaves the
+            // previous iteration's answer standing instead of re-adopting it here.
+            state.root_best = None;
+            match alphabeta(pos, depth, alpha, beta, 0, state) {
                 None => {
                     complete = false;
                     break;
@@ -585,7 +613,7 @@ pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
                         continue;
                     }
                     last_score = Some(score);
-                    if let Some(turn) = state.tt.get(root_key).and_then(|e| e.best_move) {
+                    if let Some((turn, _)) = state.root_best {
                         state.tt.insert(root_key, TtEntry {
                             depth,
                             score,
@@ -602,8 +630,131 @@ pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
             break;
         }
     }
+    best
+}
 
-    dump_profile("search", start, &state);
+/// Threads to search with. **Defaults to 1**, and to anything else only if
+/// `SPELLCHESS_THREADS` says so.
+///
+/// Defaulting to `available_parallelism` was tried and measured worse on 2026-09-02
+/// (Pi 5, 4 cores, depth 6 from the starting position): 1 thread 6.97s, 2 threads
+/// 10.25s, 4 threads 7.4-26.5s run to run. See `search_smp` for why -- it is a
+/// property of this engine, not a tuning knob, so the default is off until that
+/// changes.
+pub fn default_threads() -> usize {
+    if let Some(n) = std::env::var("SPELLCHESS_THREADS").ok().and_then(|v| v.parse::<usize>().ok()) {
+        return n.max(1);
+    }
+    1
+}
+
+/// Single-threaded search. Deterministic: same position and budget, same answer and
+/// same node counts, every time. Use `search_smp` to spend more cores.
+pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
+    search_smp(pos, budget, 1)
+}
+
+/// Lazy SMP: `threads` threads share one transposition table and otherwise search
+/// independently, differing only in the depth they start their iterative deepening at.
+/// The helpers never report; they exist to fill the table with bounds and best moves
+/// the main thread then hits, which is where the speedup comes from.
+///
+/// **Measured a net LOSS on this engine (2026-09-02, Pi 5, depth 6 from the starting
+/// position): 1 thread 6.97s, 2 threads 10.25s, 4 threads 7.4-26.5s.** That is not a
+/// tuning problem, it is structural. Lazy-SMP pays off when helpers shrink the main
+/// thread's tree through shared table hits, and here they cannot: 87% of this search's
+/// nodes are quiescence nodes (2.38M qnodes against 340k nodes at depth 6) and
+/// quiescence never probes the transposition table, so every helper re-derives that
+/// 87% from scratch. The counters say so directly -- 2 threads do 6.30M qnodes where 1
+/// does 2.38M, i.e. 2.6x the work for 2x the cores, before the four cores even start
+/// contending for bandwidth on an ~84MB table.
+///
+/// Making this pay would mean giving quiescence something to share, not tuning the
+/// thread count. Left in, off by default, so the next attempt starts from the
+/// measurement instead of repeating it.
+///
+/// The result is also not reproducible above 1 thread: which helper wins a race to a
+/// table slot decides which of several turns comes back. `threads == 1` is exactly the
+/// single-threaded path and stays deterministic.
+pub fn search_smp(pos: &Position, budget: Budget, threads: usize) -> Option<(Turn, i32)> {
+    let start = Instant::now();
+    let threads = threads.max(1);
+    let deadline = match budget {
+        Budget::Time(limit) => Some(start + limit),
+        Budget::Depth(_) => None,
+    };
+    let max_depth = match budget {
+        Budget::Depth(d) => d,
+        Budget::Time(_) => 64,
+    };
+    let tt = TranspositionTable::new();
+    let stop = AtomicBool::new(false);
+    let mut best: Option<(Turn, i32)> = None;
+
+    std::thread::scope(|scope| {
+        let helpers: Vec<_> = (1..threads)
+            .map(|i| {
+                let (tt, stop) = (&tt, &stop);
+                scope.spawn(move || {
+                    let mut killers = KillerTable::new(max_depth + KILLER_PLY_SLACK);
+                    let mut history = HistoryTable::new();
+                    let mut state = SearchState {
+                        tt,
+                        deadline,
+                        stop: Some(stop),
+                        root_best: None,
+                        killers: &mut killers,
+                        history: &mut history,
+                        nodes: 0,
+                        qnodes: 0,
+                        spell_gens: 0,
+                        tt_hits: 0,
+                        nmp_cutoffs: 0,
+                        no_spell_cutoffs: 0,
+                    };
+                    // Stagger the starting depth so the helpers are not re-deriving
+                    // the main thread's current iteration move for move. Capped at
+                    // `max_depth` so a shallow search still gives them something to do.
+                    let offset = (i as u32 % 3).min(max_depth.saturating_sub(1));
+                    iterate(pos, max_depth, 1 + offset, false, &mut state);
+                    (state.nodes, state.qnodes, state.spell_gens, state.tt_hits, state.nmp_cutoffs, state.no_spell_cutoffs)
+                })
+            })
+            .collect();
+
+        let mut killers = KillerTable::new(max_depth + KILLER_PLY_SLACK);
+        let mut history = HistoryTable::new();
+        let mut state = SearchState {
+            tt: &tt,
+            deadline,
+            stop: Some(&stop),
+            root_best: None,
+            killers: &mut killers,
+            history: &mut history,
+            nodes: 0,
+            qnodes: 0,
+            spell_gens: 0,
+            tt_hits: 0,
+            nmp_cutoffs: 0,
+            no_spell_cutoffs: 0,
+        };
+        best = iterate(pos, max_depth, 1, true, &mut state);
+        // The main thread has its answer; tell the helpers to unwind rather than
+        // finish iterations nobody will read.
+        stop.store(true, Ordering::Relaxed);
+        for h in helpers {
+            let (n, q, g, t, nm, ns) = h.join().expect("search helper thread panicked");
+            state.nodes += n;
+            state.qnodes += q;
+            state.spell_gens += g;
+            state.tt_hits += t;
+            state.nmp_cutoffs += nm;
+            state.no_spell_cutoffs += ns;
+        }
+        // Counters are summed across threads, so `nodes`/`nps` read as total work done
+        // rather than work done by the reporting thread.
+        dump_profile("search", start, &state);
+    });
 
     // Deepest last resort: with a very short budget the deadline can fire before
     // even the first root move has been scored, leaving `best` empty. Returning
@@ -671,6 +822,49 @@ mod tests {
         let (turn, _score) = search(&pos, Budget::Depth(1)).expect("a move must be found");
         assert_eq!(turn.mv.to, Square::from_str("e1").unwrap());
         assert!(turn.spell.is_some());
+    }
+
+    /// The helpers must not change the answer on a position with only one winning
+    /// move: whichever thread's best move reaches the root table entry first, it has
+    /// to be that one.
+    #[test]
+    fn smp_finds_the_same_forced_mate_as_the_single_threaded_search() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("g8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("f7").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("g7").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("h7").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.white_spells = spellchess_core::SpellState {
+            freeze: spellchess_core::SpellCounter { count: 0, lock: 0 },
+            jump: spellchess_core::SpellCounter { count: 0, lock: 0 },
+        };
+        pos.black_spells = pos.white_spells;
+        let (one, one_score) = search_smp(&pos, Budget::Depth(2), 1).expect("a move must be found");
+        for threads in [2, 4] {
+            let (many, many_score) =
+                search_smp(&pos, Budget::Depth(2), threads).expect("a move must be found");
+            assert_eq!(many.mv.to, Square::from_str("a8").unwrap(), "{threads} threads missed Ra8#");
+            assert_eq!(many.mv, one.mv, "{threads} threads disagreed with the 1-thread search");
+            assert_eq!(many_score, one_score, "{threads} threads scored Ra8# differently");
+        }
+    }
+
+    /// A time budget has to bind every thread, not just the reporting one -- the join
+    /// at the end of `search_smp` blocks on the slowest helper, so a helper that
+    /// ignored the deadline would hang the whole search well past it.
+    #[test]
+    fn an_smp_time_budget_binds_the_helper_threads_too() {
+        let pos = Position::starting();
+        let start = std::time::Instant::now();
+        let result = search_smp(&pos, Budget::Time(std::time::Duration::from_millis(200)), 4);
+        let elapsed = start.elapsed();
+        assert!(result.is_some(), "a legal turn exists in the starting position");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "search_smp overran its 200ms budget by far too much: {elapsed:?}",
+        );
     }
 
     #[test]

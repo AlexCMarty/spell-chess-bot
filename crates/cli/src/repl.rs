@@ -1,7 +1,7 @@
 use spellchess_core::{apply_turn, game_status, GameStatus, Position};
 use crate::notation::parse_turn;
 use crate::render::render_board;
-use spellchess_search::search::{search as run_search, Budget};
+use spellchess_search::search::{default_threads, search_smp, Budget};
 
 const DEFAULT_GO_TIME: std::time::Duration = std::time::Duration::from_secs(5);
 const GO_USAGE: &str = "usage: go | go --depth N | go --time SECONDS";
@@ -84,7 +84,7 @@ impl Session {
             Ok(b) => b,
             Err(e) => return format!("error: {e}"),
         };
-        match run_search(&self.pos, budget) {
+        match search_smp(&self.pos, budget, default_threads()) {
             Some((turn, score)) => format!("suggest: {} (eval {})", crate::notation::format_turn(&turn), score),
             None => "no legal turn available".to_string(),
         }
