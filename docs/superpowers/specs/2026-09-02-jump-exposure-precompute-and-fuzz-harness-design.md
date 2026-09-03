@@ -89,20 +89,19 @@ jumped, only who owns the piece(s) revealed behind it.
 
 ### Integration into `jump_captures`
 
-Replace the unconditional `attackers_to` call at `spell_delta.rs:215` with:
-
-- `!ctx.jump_exposure.contains(s)` → `checkers_after` is provably `ctx.checkers`
-  unchanged. Reuse `ctx.checkers` directly (no bitboard union needed, no call). The
-  existing `checkers_after.count() > 1` decline becomes `ctx.checkers.count() > 1`
-  (covers a pre-existing double check the caller is already in, independent of this
-  jump) and `single_checker` becomes `ctx.checkers.iter().next()`.
-- `ctx.jump_exposure.contains(s)` → look up the paired attacker square from the small
-  array, and `checkers_after` is `ctx.checkers.with(revealed_square)` — one bitboard
-  union, still no ray walk at query time. `revealed_square` cannot already be a member
-  of `ctx.checkers` (its line to the king was blocked by `s`, and a square lies on at
-  most one line through the king, so it cannot simultaneously be an already-open
-  attacker via a different line), so `count() == ctx.checkers.count() + 1` requires no
-  further reasoning.
+Replace the unconditional `attackers_to` call at `spell_delta.rs:215` with a single
+line: `let checkers_after = ctx.checkers.union(ctx.jump_exposure.revealed_by(s));`.
+`revealed_by(s)` returns the `Bitboard` of attackers `s` reveals (empty if `s` isn't
+an exposure square at all), so the union is a no-op for the common case — no branch,
+no ray walk at query time either way. The existing `checkers_after.count() > 1`
+decline and `single_checker = checkers_after.iter().next()` are otherwise unchanged;
+they naturally generalize to the rare case of more than one revealed attacker (see
+"The precompute" above) without any special-casing, since `union`+`count` doesn't
+care how many bits `revealed_by` set. The revealed square(s) cannot already be a
+member of `ctx.checkers` (their line to the king was blocked by `s`, and a square
+lies on at most one line through the king, so none can simultaneously be an
+already-open attacker via a different line) — so the count is exact with no further
+reasoning needed.
 
 Every other branch of `jump_captures` (the `sliders.reach` short-circuit, the pin
 walk, the king-capture/pinned-onto-jump-square declines) is unchanged — this replaces
