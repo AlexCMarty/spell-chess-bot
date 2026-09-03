@@ -1,0 +1,30 @@
+[package]
+name = "spellchess-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.spellchess-core]
+path = ".."
+
+[[bin]]
+name = "fuzz_freeze"
+path = "fuzz_targets/fuzz_freeze.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_jump"
+path = "fuzz_targets/fuzz_jump.rs"
+test = false
+doc = false
+bench = false
