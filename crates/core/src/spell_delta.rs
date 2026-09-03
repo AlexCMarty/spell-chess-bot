@@ -1383,12 +1383,17 @@ mod tests {
         // `after_count <= before_count.max(1)` (`legal.rs`'s king-capture check,
         // ~line 120; see `rules/50-interactions.md`'s "Win conditions" section for
         // the `[VERIFIED]` rule this implements) -- it is NOT true in general that
-        // double check permits capturing the enemy king. It holds here only because
-        // g3 (where the queen starts) already has a live jump field before this
-        // spell: vacating it doesn't touch `slider_occ` at all, so
-        // attackers_after == attackers_before == 2 <= max(2, 1). This fixture's
-        // point is that nothing *else* (no interposition, no other capture) is
-        // legal, which is what actually distinguishes single from double check.
+        // double check permits capturing the enemy king. It holds here because, in
+        // the hypothetical (jump@g3 cast, before the piece move), g5 -- the rook's
+        // square, which already carries the pre-existing live jump field set up by
+        // `add_field` above -- is transparent independently of g3. So Rg5 already
+        // checks through both transparent squares (g3 from the cast under test, g5
+        // from the pre-existing field) before the queen ever moves. `Qg3xe1` then
+        // vacates g3, but g3's transparency had already made it non-blocking, so
+        // physically emptying it changes nothing: attackers_after == attackers_before
+        // == 2 <= max(2, 1). This fixture's point is that nothing *else* (no
+        // interposition, no other capture) is legal, which is what actually
+        // distinguishes single from double check.
         assert!(
             !hyp_moves.is_empty()
                 && hyp_moves.iter().all(|mv| {
