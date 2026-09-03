@@ -1403,4 +1403,34 @@ mod tests {
         );
         assert!(out.is_empty(), "a declining call must not touch `out`");
     }
+
+    /// The walk-through-transparency guard itself, isolated: a WRONG-KIND
+    /// piece (a knight, which can never check via a straight-line ray) sits
+    /// on its own transparent square between the blocker and the real
+    /// attacker. The scan must not stop at the knight -- it doesn't match,
+    /// but it also doesn't block (its own square is jump-transparent), so
+    /// the walk must continue past it to find the rook. This is the fixture
+    /// `jump_exposure_sees_past_an_already_transparent_revealed_piece` above
+    /// cannot cover: that one only ever needs a single hop (g4 is empty
+    /// there), so it stays green even if the "keep walking" step is deleted
+    /// entirely. This one needs two hops and dies if it is (found by task
+    /// review during Task 2, 2026-09-02 -- see the ruling above this test).
+    #[test]
+    fn jump_exposure_walks_past_a_non_matching_piece_on_a_transparent_square() {
+        let mut pos = empty_board();
+        put(&mut pos, "g2", Color::Black, PieceKind::King);
+        put(&mut pos, "g3", Color::Black, PieceKind::Queen);
+        put(&mut pos, "g4", Color::White, PieceKind::Knight);
+        put(&mut pos, "g5", Color::White, PieceKind::Rook);
+        put(&mut pos, "e1", Color::White, PieceKind::King);
+        pos.side_to_move = Color::Black;
+        add_field(&mut pos, "g4", Color::White, SpellKind::Jump);
+
+        let ctx = NodeContext::new(&pos);
+        assert_eq!(
+            ctx.jump_exposure.revealed_by(sq("g3")),
+            Bitboard::from_square(sq("g5")),
+            "fixture is wrong: the walk must skip the non-matching knight on g4 (transparent) and find the rook on g5",
+        );
+    }
 }
