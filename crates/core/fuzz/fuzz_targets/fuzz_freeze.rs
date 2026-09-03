@@ -148,16 +148,21 @@ fuzz_target!(|data: &[u8]| {
     for square in spells::freeze_targets(&pos, pos.side_to_move) {
         let cast = SpellCast { kind: SpellKind::Freeze, square };
         let mut fast = Vec::new();
-        if captures_enabled_by(&pos, cast, &baseline, &mut fast) == Delta::Complete {
-            let want = rescan_oracle(&pos, cast, &baseline);
-            let mut got_sorted: Vec<_> = fast.iter().map(key).collect();
-            let mut want_sorted: Vec<_> = want.iter().map(key).collect();
-            got_sorted.sort();
-            want_sorted.sort();
-            assert_eq!(got_sorted, want_sorted, "SET MISMATCH for {cast:?} on {:?}", pos.board);
-            let got_raw: Vec<_> = fast.iter().map(key).collect();
-            let want_raw: Vec<_> = want.iter().map(key).collect();
-            assert_eq!(got_raw, want_raw, "ORDER MISMATCH for {cast:?} on {:?}", pos.board);
+        match captures_enabled_by(&pos, cast, &baseline, &mut fast) {
+            Delta::Complete => {
+                let want = rescan_oracle(&pos, cast, &baseline);
+                let mut got_sorted: Vec<_> = fast.iter().map(key).collect();
+                let mut want_sorted: Vec<_> = want.iter().map(key).collect();
+                got_sorted.sort();
+                want_sorted.sort();
+                assert_eq!(got_sorted, want_sorted, "SET MISMATCH for {cast:?} on {:?}", pos.board);
+                let got_raw: Vec<_> = fast.iter().map(key).collect();
+                let want_raw: Vec<_> = want.iter().map(key).collect();
+                assert_eq!(got_raw, want_raw, "ORDER MISMATCH for {cast:?} on {:?}", pos.board);
+            }
+            Delta::NeedsRescan => {
+                assert!(fast.is_empty(), "a declining call must not touch `out`");
+            }
         }
     }
 });
