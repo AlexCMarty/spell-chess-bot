@@ -41,6 +41,12 @@ struct SliderScan {
 }
 
 impl SliderScan {
+    const EMPTY: SliderScan = SliderScan {
+        count: 0,
+        items: [(Square(0), PieceKind::Pawn, Bitboard::EMPTY); MAX_SLIDERS],
+        reach: Bitboard::EMPTY,
+    };
+
     fn recorded(&self) -> Option<&[(Square, PieceKind, Bitboard)]> {
         (self.count <= MAX_SLIDERS).then(|| &self.items[..self.count])
     }
@@ -189,9 +195,20 @@ impl NodeContext {
                 PinMap { pinned: Bitboard::EMPTY, rays: [Bitboard::EMPTY; 64] },
             ),
         };
+        // Both `sliders` and `jump_exposure` are read only by `jump_captures`
+        // (see its `ctx.sliders`/`ctx.jump_exposure` uses below), which every
+        // caller already gates on this same `castable()` check before calling
+        // `captures_enabled_by_in` with a jump cast -- so computing either when
+        // jump is exhausted or on cooldown is pure waste.
+        let jump_castable = pos.spells(us).jump.castable();
         let jump_exposure = match king_sq {
-            Some(k) => jump_exposure_scan(&pos.board, k, enemy, frozen, slider_occ, jump),
-            None => JumpExposure::EMPTY,
+            Some(k) if jump_castable => jump_exposure_scan(&pos.board, k, enemy, frozen, slider_occ, jump),
+            _ => JumpExposure::EMPTY,
+        };
+        let sliders = if jump_castable {
+            slider_scan(&pos.board, us, frozen, slider_occ)
+        } else {
+            SliderScan::EMPTY
         };
         NodeContext {
             us,
@@ -203,7 +220,7 @@ impl NodeContext {
             enemy_bb: pos.board.color_bb(enemy),
             checkers,
             pins,
-            sliders: slider_scan(&pos.board, us, frozen, slider_occ),
+            sliders,
             jump_exposure,
         }
     }
@@ -214,6 +231,14 @@ impl NodeContext {
 ///
 /// Returning `NeedsRescan` is always safe: correctness never depends on this
 /// function being exhaustive, only speed does.
+///
+/// Precondition for a `SpellKind::Jump` cast: `cast.square` must be one `pos
+/// .side_to_move` could actually cast jump on right now, i.e. `pos.spells
+/// (pos.side_to_move).jump.castable()` -- `NodeContext::new` skips the jump-only
+/// precompute otherwise (jump is exhausted or on cooldown), and every existing
+/// caller already satisfies this because it sources `cast.square` from
+/// `spells::jump_targets`/`relevant_jump_targets`, both of which return empty
+/// when the spell isn't castable.
 ///
 /// Invariant upheld for every `NeedsRescan` return, including from future
 /// (Task 3-5) code paths that speculatively push candidates into `out` before
