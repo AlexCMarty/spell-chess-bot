@@ -49,28 +49,43 @@ this without calling `attackers_to` and comparing, because the check is expresse
 ### The precompute
 
 Once per node, in `NodeContext::new`, walk each of the king's 8 directions
-(`ROOK_DIRS` ∪ `BISHOP_DIRS` from `rays.rs`) against `ctx.slider_occ` (which already
-has *existing* live jump squares subtracted, matching how the rest of `NodeContext` is
-built):
+(`ROOK_DIRS` ∪ `BISHOP_DIRS` from `rays.rs`). The walk needs two different notions of
+occupancy at once, and conflating them is the bug this section exists to steer readers
+away from:
 
-1. `first = ray_attacks(king_sq, ctx.slider_occ, dir).intersect(ctx.slider_occ)` — the
-   first blocker in this direction, or empty if the ray runs off the board with no
-   blocker (nothing to precompute for this direction).
-2. `second = ray_attacks(first_square, ctx.slider_occ, dir).intersect(ctx.slider_occ)`
-   — the next blocker past it, or empty.
-3. If `second` is non-empty, the piece there is enemy-colored (`ctx.enemy`),
-   **unfrozen** (`!ctx.frozen.contains(second_square)`), and its kind matches the ray
-   (`Bishop`/`Queen` for a `BISHOP_DIRS` entry, `Rook`/`Queen` for `ROOK_DIRS`), then
-   `first_square` is a jump-exposure square and `second_square` is the attacker it
-   would reveal.
+- **Blocking** is transparency-based: a square with a live jump field never blocks a
+  ray, no matter what stands on it. This is exactly `ctx.slider_occ` (existing live
+  jump squares already subtracted), so the walk advances past those squares.
+- **"Is there an attacker here"** is a real-occupancy question, independent of
+  transparency: a piece standing on an already-transparent square still attacks from
+  its own square (jump erases a square's ability to *block other rays passing through
+  it*, not the piece sitting on it — the same principle `attackers_to` relies on, see
+  `attacks.rs`'s `slider_on_a_jump_square_still_attacks` test). So the "is a piece
+  here" test must use `board.occupancy()`, the real board, not `ctx.slider_occ`.
 
-This yields at most 8 exposure squares per node (one per direction; a square lies on
-at most one of the king's 8 lines, so there is no possibility of two directions
-disagreeing about the same square). Store as a `Bitboard jump_exposure` plus a small
-fixed array `[(Square, Square); 8]` (exposure square → revealed attacker square,
-mirroring the existing `MAX_SLIDERS`-array style already used for `SliderScan`).
-Color of the blocker at `first_square` is irrelevant — jump transparency doesn't care
-who owns the piece being jumped, only who owns the piece revealed behind it.
+Concretely: for each direction, find `blocker`, the first *real* piece encountered
+walking from the king outward while treating already-transparent squares as
+pass-through (so the walk can step over a square with a live jump field even if it's
+occupied). If the ray runs off the board with no real piece at all, there's nothing to
+precompute for this direction. Otherwise, continue walking past `blocker` the same
+way — stepping over further already-transparent occupied squares rather than stopping
+at them — and record every real piece found along the rest of the line that is
+enemy-colored (`ctx.enemy`), **unfrozen** (`!ctx.frozen.contains(sq)`), and whose kind
+matches the ray (`Bishop`/`Queen` for a `BISHOP_DIRS` entry, `Rook`/`Queen` for
+`ROOK_DIRS`). `blocker` is then a jump-exposure square, and the set of matching pieces
+found past it are the attacker(s) jumping it would reveal.
+
+Walking past already-transparent squares means a single blocker can, in principle,
+reveal more than one attacker — only when multiple pre-existing jump fields are
+stacked on the same line, which is rare but not impossible, so the revealed side of
+each entry is a `Bitboard`, not a single `Square`. This yields at most 8 exposure
+squares per node (one per direction; a square lies on at most one of the king's 8
+lines, so there is no possibility of two directions disagreeing about the same
+square). Store as a `Bitboard jump_exposure` mask plus a small fixed array
+`[(Square, Bitboard); 8]` (exposure square → revealed-attacker(s) bitboard, mirroring
+the existing `MAX_SLIDERS`-array style already used for `SliderScan`). Color of the
+blocker itself is irrelevant — jump transparency doesn't care who owns the piece being
+jumped, only who owns the piece(s) revealed behind it.
 
 ### Integration into `jump_captures`
 
