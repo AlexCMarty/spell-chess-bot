@@ -10,6 +10,14 @@ Three-crate Cargo workspace: `crates/core` (board, movegen, rules engine — no 
 depends on both). `cargo build --workspace` / `cargo test --workspace` cover everything; scope
 to `-p spellchess-core` etc. to iterate on one crate.
 
+`crates/core/fuzz/` is a `cargo-fuzz` crate (targets `fuzz_freeze` and `fuzz_jump`) with its own
+`[workspace]` table, deliberately isolated from the root workspace — so it is **not** covered by
+`cargo build --workspace` / `cargo test --workspace`. Run it with, e.g.,
+`cd crates/core && cargo +nightly fuzz run fuzz_jump -- -max_total_time=120` (requires a nightly
+toolchain). Run `cargo +nightly fuzz build` manually after any change to `spellchess-core`'s
+public API (`captures_enabled_by`, `Delta`, `spells::jump_targets`/`freeze_targets`, etc.) that
+the fuzz targets depend on, since nothing else will catch a break there.
+
 ## Ruleset
 
 Full rule corpus lives in [`rules/`](rules/), routed from [`rules/INDEX.md`](rules/INDEX.md) —
