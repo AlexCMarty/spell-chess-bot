@@ -1184,7 +1184,7 @@ mod tests {
 
     /// Same mechanism, diagonal ray: king e1's (-1,+1) diagonal is blocked by a
     /// knight on c3 with a bishop behind it on a5. White's queen on e5
-    /// independently gains Rxa1 through the same jump (its own diagonal through
+    /// independently gains Qxa1 through the same jump (its own diagonal through
     /// c3 in the *other* direction), which must be filtered the same way.
     #[test]
     fn jump_exposure_on_a_bishop_line_filters_captures_to_the_new_checker() {
@@ -1378,12 +1378,17 @@ mod tests {
         let cast = SpellCast { kind: SpellKind::Jump, square: sq("g3") };
         let hypothetical = crate::legal::position_with_field(&pos, cast);
         let hyp_moves = legal_moves(&hypothetical);
-        // Double check (Nh4 + Rg5) restricts Black to king moves -- plus the one
-        // carve-out that survives any check, including double check: capturing the
-        // enemy king outright (rules/README.md, "the king can be captured, and it
-        // wins"). g3-f2-e1 is a clear diagonal here, so Qxe1 is also legal; this
-        // fixture's point is that nothing *else* (no interposition, no other capture)
-        // is legal, which is what actually distinguishes single from double check.
+        // Double check (Nh4 + Rg5) restricts Black to king moves -- plus, in this
+        // position specifically, Qxe1. King capture is legal exactly when
+        // `after_count <= before_count.max(1)` (`legal.rs`'s king-capture check,
+        // ~line 120; see `rules/50-interactions.md`'s "Win conditions" section for
+        // the `[VERIFIED]` rule this implements) -- it is NOT true in general that
+        // double check permits capturing the enemy king. It holds here only because
+        // g3 (where the queen starts) already has a live jump field before this
+        // spell: vacating it doesn't touch `slider_occ` at all, so
+        // attackers_after == attackers_before == 2 <= max(2, 1). This fixture's
+        // point is that nothing *else* (no interposition, no other capture) is
+        // legal, which is what actually distinguishes single from double check.
         assert!(
             !hyp_moves.is_empty()
                 && hyp_moves.iter().all(|mv| {
