@@ -8,3 +8,8 @@ research/variants.pretty.js
 
 # Rust build artifacts
 target/
+
+# cargo-fuzz corpus/crash output for crates/core/fuzz -- its target/ dir is
+# already covered by the blanket `target/` rule above.
+crates/core/fuzz/corpus/
+crates/core/fuzz/artifacts/
