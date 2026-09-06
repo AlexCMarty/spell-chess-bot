@@ -62,17 +62,36 @@ captures is a subsequence of filtering `pseudo_legal_moves`'s output for capture
 (same relative order, fewer entries). Differences per arm:
 
 - **Knight / King:** intersect the attack pattern with `enemy_bb` (mirrors
-  `spell_delta.rs`'s existing `piece_capture_targets` helper) instead of subtracting
-  `own` — no separate own-piece exclusion needed since `enemy_bb` already excludes
-  every own-colored square.
+  `spell_delta.rs`'s existing `piece_capture_targets` helper — knight/king arms only;
+  that helper's own doc notes its pawn arm drops promotions and is not reusable for
+  the pawn case below) instead of subtracting `own` — no separate own-piece exclusion
+  needed since `enemy_bb` already excludes every own-colored square.
 - **Bishop / Rook / Queen:** intersect slide-attacks with `enemy_bb` instead of
-  `.minus(own)`.
+  `.minus(own)`. Verified algebraically: `attacks ∩ enemy_bb == attacks.minus(own) ∩
+  occupancy`, i.e. exactly `is_capture`'s definition, and jump transparency doesn't
+  break this (a jumped enemy square is in both `attacks` and `enemy_bb`).
 - **Pawn:** keep only the diagonal-capture loop (including en passant); drop the
   single-push and double-push blocks entirely. This also correctly drops quiet
   promotions while keeping capture-promotions, with no separate promotion-vs-capture
   branch needed — a promotion is only emitted at all when the underlying move survives
   whichever loop produces it.
-- **Castling:** dropped entirely — never a capture.
+- **Castling:** dropped entirely — `castle_moves`'s two moves both require an empty
+  destination square, so they're never captures.
+- **No king on the board:** `legal_moves` returns `Vec::new()` when
+  `pos.board.king_square(mover)` is `None` (reachable in this variant — the king can
+  be captured and capturing it wins, see `vector_9_king_capture_via_jump`).
+  `pseudo_legal_captures`/`legal_captures` must short-circuit the same way, not treat
+  `king_sq` as unconditionally present — `LegalCtx` construction is fallible for
+  exactly this reason.
+- **Allocation shape:** `pawn_moves` and `slide_dests` (used by `pseudo_legal_moves`)
+  each return a fresh `Vec` per piece; keeping that shape for the captures-only
+  generator would preserve most of the per-piece allocation overhead while only
+  trimming element count, undermining the perf rationale. `pseudo_legal_captures`
+  should push directly into one shared output `Vec<PieceMove>` per call (dedicated
+  capture-only per-piece-kind logic, not delegating to `pawn_moves`/`slide_dests`) so
+  the saving includes fewer allocations, not just fewer entries. Do not assume in
+  advance how much of `pseudo_legal_moves`'s 670-890ns cost is allocation vs. element
+  count — the Measurement section's `hotcost` re-run settles that.
 
 ### Shared filter extraction (`crates/core/src/legal.rs`)
 
@@ -89,6 +108,22 @@ before/after equivalence test (see Testing).
 
 The `LEGAL_MOVE_FILTERS == 6` tripwire and its accompanying comment in `legal.rs`
 move with the extracted function; no change to the count or the enumeration itself.
+`spell_delta.rs`'s own comments referencing "`legal_moves`' filter list" (its doc
+comment and the guard comments around lines 336, 369, 378, 609, 651) should be updated
+to say `move_survives`, since that's the function whose filter count and behavior they
+now describe.
+
+`legal_captures` is `pub`, added to `lib.rs`'s existing re-export list alongside
+`legal_moves` (both are needed by the equivalence tests below, which run as
+integration tests outside the crate). `is_capture` stays private and unexported —
+`move_survives`'s king/en-passant/pin/checker-count filters already subsume what it's
+used for at both call sites, so nothing needs it publicly. This means the order-
+sensitive equivalence property (`legal_captures(pos) == legal_moves(pos).filter(is_capture)`)
+can only be asserted directly inside `legal.rs`'s own `mod tests`, where both are
+in scope; the fixture-driven sweep against `spell_delta_soundness.rs`/
+`oracle_vectors.rs` geometries (external `tests/` integration tests) instead asserts
+`legal_captures`'s output against each fixture's already-known expected capture set,
+without needing to re-derive it via `is_capture` from outside the module.
 
 ### Call-site change (`crates/core/src/legal.rs`, both rescan arms)
 
@@ -112,6 +147,15 @@ No other call site changes. `legal_moves` itself, and every existing caller of i
 (CLI, `game_status`, the root generators still on the rescan path per items 13/14/16),
 is untouched — this only changes the two quiescence rescan arms.
 
+**Why the swap is safe despite `is_capture(pos, &mv)` and `legal_captures(&hypo)`
+running against different positions:** the original code tests captures against the
+*pre-cast* `pos`, while the replacement decides captures internally against `hypo`.
+These agree only because `position_with_field` (`legal.rs:247-256`) touches only
+`fields` — `board` and `en_passant` are copied unchanged from `pos` into `hypo` — so
+"is `mv.to` occupied on `pos`" and "is `mv.to` occupied on `hypo`" are the same
+question. This is the one place the swap isn't a literal identity and is worth a
+comment at the call site, not just in this spec.
+
 ## Testing
 
 Per this project's standing discipline (`fuzzing-is-not-discovery` memory: random
@@ -123,20 +167,33 @@ mutation testing have found every real bug):
    existing hand-built fixtures, `oracle_vectors.rs`'s fixtures, and a differential
    sweep. This is the guard against the one part of this change that touches the
    existing canonical function's internals.
-2. **`legal_captures` equivalence, order-sensitive.** `legal_captures(pos)` must equal
-   `legal_moves(pos).into_iter().filter(|mv| is_capture(pos, mv)).collect()` as an
-   **ordered sequence**, not just a set — item 13's lesson applies directly here
+2. **`legal_captures` equivalence, order-sensitive.** The property is
+   `legal_captures(pos) == legal_moves(pos).into_iter().filter(|mv| is_capture(pos, mv)).collect()`
+   as an **ordered sequence**, not just a set — item 13's lesson applies directly here
    (`generate_quiescence_from` consumes emission order unsorted, so a same-set/
    different-order bug changes qnode counts and beta-cutoff behavior without changing
-   correctness in the narrow sense). Run over the existing hand-built adversarial
-   geometries already in `spell_delta_soundness.rs` and `oracle_vectors.rs` (pins,
-   multi-check, stacked jump transparency, sparse endgames), not just random positions.
-   Explicit fixtures required: en passant captures present; capture-promotions present
+   correctness in the narrow sense). Since `is_capture` is private (see below), this
+   exact property is asserted directly only inside `legal.rs`'s own `mod tests`, over
+   a broad sweep of positions built with that module's existing test helpers. The
+   *same* adversarial geometries, ported into the external `crates/core/tests/`
+   fixture sweep (`spell_delta_soundness.rs`/`oracle_vectors.rs`-style: pins,
+   multi-check, stacked jump transparency, sparse endgames), instead assert
+   `legal_captures`'s output against each fixture's independently-known expected
+   capture list — a different mechanism proving the same cases, not a restatement of
+   the internal property. Explicit fixtures required in both layers: en passant
+   captures present; capture-promotions present
    and quiet promotions absent; a pinned piece capturing onto a live jump square (the
    clone-and-rescan arm inside `move_survives`'s pin filter); a pre-existing double
    check (only king captures should ever survive the filter, so
    `pseudo_legal_captures` must still emit the king's capture candidates for the
-   filter to correctly accept/reject them).
+   filter to correctly accept/reject them); an enemy-king capture (filter 1, the
+   `after_count <= before_count.max(1)` arm — the only filter reachable *exclusively*
+   through the captures list, since a non-capture can never target the enemy king);
+   a slider capturing through a live jump square onto an enemy piece beyond it (the
+   exact geometry where the `∩ enemy_bb` vs. `.minus(own)` algebraic equivalence
+   argued above could diverge if implemented wrong); and a position with no king on
+   the mover's side (both `legal_moves` and `legal_captures` must return empty, not
+   panic on an absent `king_sq`).
 3. **End-to-end invariance.** This is a pure optimization — nothing about which turns
    get generated should change anywhere in the tree. The release `--ignored`
    perf-bounds suite's node/qnode counters must come out bit-identical to the
