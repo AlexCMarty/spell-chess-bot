@@ -179,9 +179,83 @@ pub fn pseudo_legal_moves(pos: &Position) -> Vec<PieceMove> {
     out
 }
 
+fn pawn_capture_moves(pos: &Position, sq: Square, color: Color, out: &mut Vec<PieceMove>) {
+    let dir: i8 = if color == Color::White { 1 } else { -1 };
+    let promo_rank: u8 = if color == Color::White { 7 } else { 0 };
+    let (f, r) = (sq.file() as i8, sq.rank() as i8);
+    for df in [-1i8, 1i8] {
+        let (cf, cr) = (f + df, r + dir);
+        if !in_bounds(cf, cr) {
+            continue;
+        }
+        let dest = Square::new(cf as u8, cr as u8);
+        if let Some(p) = pos.board.get(dest) {
+            if p.color != color {
+                add_pawn_move(out, sq, dest, false, promo_rank);
+            }
+        } else if pos.en_passant == Some(dest) {
+            add_pawn_move(out, sq, dest, true, promo_rank);
+        }
+    }
+}
+
+fn slide_capture_moves(from: Square, enemy_bb: Bitboard, slider_occ: Bitboard, bishop: bool, rook: bool, out: &mut Vec<PieceMove>) {
+    let mut attacks = Bitboard::EMPTY;
+    if bishop {
+        attacks = attacks.union(bishop_attacks(from, slider_occ));
+    }
+    if rook {
+        attacks = attacks.union(rook_attacks(from, slider_occ));
+    }
+    for to in attacks.intersect(enemy_bb).iter() {
+        out.push(PieceMove::quiet(from, to));
+    }
+}
+
+/// Captures-only sibling of `pseudo_legal_moves`. Mirrors its exact per-square
+/// iteration order (`own.minus(frozen)`, ascending) and per-`PieceKind` dispatch, so
+/// filtering `pseudo_legal_moves`'s output down to captures yields precisely this
+/// function's output, in the same relative order -- see
+/// `pseudo_legal_captures_matches_pseudo_legal_moves_filtered_ordered` below. Pushes
+/// directly into one shared `out` (no per-piece `Vec` allocation via `pawn_moves`/
+/// `slide_dests`, unlike `pseudo_legal_moves`) since the saving this exists for is as
+/// much about allocation count as element count. Castling is never a capture, so
+/// `castle_moves` is never called here.
+pub fn pseudo_legal_captures(pos: &Position) -> Vec<PieceMove> {
+    let color = pos.side_to_move;
+    let frozen = crate::spells::frozen_bb(pos);
+    let jump = crate::spells::jump_bb(pos);
+    let occ = pos.board.occupancy();
+    let own = pos.board.color_bb(color);
+    let enemy_bb = pos.board.color_bb(color.opposite());
+    let slider_occ = occ.minus(jump);
+    let mut out = Vec::new();
+    for sq in own.minus(frozen).iter() {
+        let piece = pos.board.get(sq).expect("color bit set");
+        match piece.kind {
+            PieceKind::Pawn => pawn_capture_moves(pos, sq, color, &mut out),
+            PieceKind::Knight => {
+                for dest in KNIGHT_ATTACKS[sq.0 as usize].intersect(enemy_bb).iter() {
+                    out.push(PieceMove::quiet(sq, dest));
+                }
+            }
+            PieceKind::King => {
+                for dest in KING_ATTACKS[sq.0 as usize].intersect(enemy_bb).iter() {
+                    out.push(PieceMove::quiet(sq, dest));
+                }
+            }
+            PieceKind::Bishop => slide_capture_moves(sq, enemy_bb, slider_occ, true, false, &mut out),
+            PieceKind::Rook => slide_capture_moves(sq, enemy_bb, slider_occ, false, true, &mut out),
+            PieceKind::Queen => slide_capture_moves(sq, enemy_bb, slider_occ, true, true, &mut out),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board::Board;
     use crate::position::Position;
     use crate::types::PieceKind;
 
@@ -247,5 +321,114 @@ mod tests {
         pos.board.set(Square::from_str("f8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
         let dests = moves_from(&pos, Square::from_str("e1").unwrap());
         assert!(!dests.contains(&Square::from_str("g1").unwrap()));
+    }
+
+    fn captures_from(pos: &Position, sq: Square) -> Vec<Square> {
+        let mut v: Vec<Square> = pseudo_legal_captures(pos).into_iter().filter(|m| m.from == sq).map(|m| m.to).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn pawn_captures_diagonally_but_not_by_pushing() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e4").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("d5").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("f5").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        let mut expected = vec![Square::from_str("d5").unwrap(), Square::from_str("f5").unwrap()];
+        expected.sort();
+        assert_eq!(captures_from(&pos, Square::from_str("e4").unwrap()), expected);
+    }
+
+    #[test]
+    fn pawn_en_passant_capture_is_included() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e5").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("d5").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.en_passant = Some(Square::from_str("d6").unwrap());
+        let caps = pseudo_legal_captures(&pos);
+        let found = caps.iter().find(|m| m.from == Square::from_str("e5").unwrap() && m.to == Square::from_str("d6").unwrap());
+        assert!(found.is_some_and(|m| m.is_en_passant), "en passant capture must be included and flagged");
+    }
+
+    #[test]
+    fn pawn_capture_promotion_included_quiet_promotion_excluded() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("b7").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("a8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
+        let caps = pseudo_legal_captures(&pos);
+        let b7 = Square::from_str("b7").unwrap();
+        let a8 = Square::from_str("a8").unwrap();
+        let b8 = Square::from_str("b8").unwrap();
+        assert_eq!(
+            caps.iter().filter(|m| m.from == b7 && m.to == a8).count(), 4,
+            "all four promotion pieces must appear for the capture on a8",
+        );
+        assert!(!caps.iter().any(|m| m.from == b7 && m.to == b8), "quiet promotion to b8 (no capture) must not appear");
+    }
+
+    #[test]
+    fn knight_captures_only_enemy_occupied_squares() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("d4").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Knight }));
+        pos.board.set(Square::from_str("c6").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("e6").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Pawn }));
+        assert_eq!(captures_from(&pos, Square::from_str("d4").unwrap()), vec![Square::from_str("c6").unwrap()]);
+    }
+
+    #[test]
+    fn king_captures_only_enemy_occupied_squares() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e4").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d5").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("e5").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Pawn }));
+        assert_eq!(captures_from(&pos, Square::from_str("e4").unwrap()), vec![Square::from_str("d5").unwrap()]);
+    }
+
+    #[test]
+    fn slider_captures_through_a_live_jump_square() {
+        use crate::position::{SpellField, SpellKind};
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("d1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("d4").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("d8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
+        assert!(captures_from(&pos, Square::from_str("d1").unwrap()).is_empty(), "fixture is wrong: d1 must not see d8 before the jump");
+        pos.fields.push(SpellField {
+            square: Square::from_str("d4").unwrap(),
+            owner: Color::White,
+            kind: SpellKind::Jump,
+            expires_after_ply: pos.ply + 1,
+        });
+        assert_eq!(captures_from(&pos, Square::from_str("d1").unwrap()), vec![Square::from_str("d8").unwrap()]);
+    }
+
+    #[test]
+    fn castling_never_appears_as_a_capture() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("h1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        assert!(pseudo_legal_moves(&pos).iter().any(|m| m.is_castle), "fixture is wrong: castling must be pseudo-legal here");
+        assert!(!pseudo_legal_captures(&pos).iter().any(|m| m.is_castle));
+    }
+
+    #[test]
+    fn pseudo_legal_captures_matches_pseudo_legal_moves_filtered_ordered() {
+        fn is_cap(pos: &Position, mv: &PieceMove) -> bool {
+            pos.board.get(mv.to).is_some() || mv.is_en_passant
+        }
+        let mut battery = vec![Position::starting()];
+        let mut sparse = Position { board: Board::empty(), ..Position::starting() };
+        sparse.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        sparse.board.set(Square::from_str("d1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        sparse.board.set(Square::from_str("d4").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Pawn }));
+        sparse.board.set(Square::from_str("d8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
+        sparse.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        battery.push(sparse);
+        for pos in battery {
+            let expected: Vec<PieceMove> = pseudo_legal_moves(&pos).into_iter().filter(|m| is_cap(&pos, m)).collect();
+            let actual = pseudo_legal_captures(&pos);
+            assert_eq!(actual, expected, "order/set mismatch for side_to_move {:?}", pos.side_to_move);
+        }
     }
 }
