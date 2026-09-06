@@ -648,10 +648,10 @@ fn freeze_captures(
     // `dedup_captures` nor the quiescence loop sorts, so a different order is a
     // different beta-cutoff order and a different qnode count.
     //
-    // `pseudo_legal_moves` walks `own.minus(frozen)` in ascending square order and
-    // emits each piece's destinations ascending too (bitboard iteration; castles come
-    // first but are never captures), and `legal_moves` only filters, so the rescan is
-    // strictly ascending by `(from, to)`. The two mechanisms above are not: mechanism
+    // `pseudo_legal_captures` walks `own.minus(frozen)` in ascending square order and
+    // emits each piece's destinations ascending too (bitboard iteration), and
+    // `legal_captures` only filters, so the rescan is strictly ascending by `(from,
+    // to)`. The two mechanisms above are not: mechanism
     // 2 emits ascending over `released`, then mechanism 3 appends the king's captures
     // last regardless of where the king sits. Sorting this call's own slice -- never
     // anything a caller already had in `out` -- restores the rescan's order.

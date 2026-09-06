@@ -80,6 +80,7 @@ pub(crate) struct LegalCtx {
     jump: Bitboard,
 }
 
+#[inline(always)]
 fn legal_ctx(pos: &Position, mover: Color) -> Option<LegalCtx> {
     let enemy = mover.opposite();
     let king_sq = pos.board.king_square(mover)?;
@@ -117,6 +118,7 @@ fn legal_ctx(pos: &Position, mover: Color) -> Option<LegalCtx> {
 // proof -- it only fires if you update the count, and the differential batteries
 // only catch a missed filter when they happen to generate the geometry. Read
 // `freeze_captures`' doc comment before touching anything here.
+#[inline(always)]
 fn move_survives(pos: &Position, mv: &PieceMove, ctx: &LegalCtx) -> bool {
     let dest_piece = pos.board.get(mv.to);
     if dest_piece.is_some_and(|p| p.kind == PieceKind::King && p.color == ctx.enemy) {
