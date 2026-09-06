@@ -580,7 +580,7 @@ fn generate_turns_from(
 /// recapturer, using only bitboard membership checks -- no `legal_moves` call.
 /// This alone is what implements "freeze the recapturer, then take"; the
 /// separate, much rarer case of freeze *creating* a capture that wasn't legal
-/// before needs the expensive `legal_moves` scan in `generate_quiescence_from`.
+/// before needs the expensive `legal_captures` scan in `generate_quiescence_from`.
 fn freeze_recapture_turns(
     pos: &Position,
     us: Color,
@@ -740,7 +740,7 @@ fn generate_quiescence_inner(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn
 /// Captures for quiescence: no-spell captures, jump casts that enable a new
 /// capture, and freeze pairings that either enable a new capture or immobilise
 /// an enemy piece that still occupies the freeze zone after a baseline capture.
-/// Expensive (a `legal_moves` scan per relevant jump/freeze target) -- use for
+/// Expensive (a `legal_captures` scan per relevant jump/freeze target) -- use for
 /// the entry into quiescence, not for every recursive node inside it. See
 /// `generate_quiescence_recapture_turns` for the cheap recursive alternative.
 pub fn generate_quiescence_turns_from(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn> {
@@ -749,7 +749,7 @@ pub fn generate_quiescence_turns_from(pos: &Position, baseline: &[PieceMove]) ->
 
 /// No-spell captures plus the cheap "freeze the recapturer" tactic only --
 /// omits jump-enabled and freeze-enabled *new* captures, which need a
-/// `legal_moves` scan per relevant target and are what made quiescence's
+/// `legal_captures` scan per relevant target and are what made quiescence's
 /// recursive nodes catastrophically expensive when they used the full
 /// generator at every ply. Meant for recursive quiescence calls, where the
 /// entry node already covered the expensive cases once.
