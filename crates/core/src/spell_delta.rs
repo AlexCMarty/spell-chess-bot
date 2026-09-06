@@ -433,7 +433,7 @@ fn piece_capture_targets(pos: &Position, from: Square, slider_occ: Bitboard, ene
 /// Freeze never changes reachability, only control (rules/30-freeze.md: frozen
 /// pieces "exert no control" but "still block sliding pieces"). Occupancy is
 /// untouched, so `pseudo_legal_moves` can only shrink; every newly *legal* move was
-/// already pseudo-legal and was rejected by one of `legal_moves`' filters. Freeze
+/// already pseudo-legal and was rejected by one of `move_survives`' filters. Freeze
 /// can therefore only flip one of these:
 ///
 /// 1. the check filters (`checker_count >= 2`, `evasion_allows`) -- declined below;
@@ -444,13 +444,13 @@ fn piece_capture_targets(pos: &Position, from: Square, slider_occ: Bitboard, ene
 /// 4. `after_count <= before_count.max(1)` for capturing the enemy king -- declined
 ///    below.
 ///
-/// That list is the spec. The `const _` assertion just below pins `legal_moves`'
+/// That list is the spec. The `const _` assertion just below pins `move_survives`'
 /// filter count so that adding or removing a filter there breaks this build -- a
-/// tripwire, not a proof, since it depends on whoever edits `legal_moves` updating
+/// tripwire, not a proof, since it depends on whoever edits `move_survives` updating
 /// the count the comment there tells them to update.
 const _: () = assert!(
     crate::legal::LEGAL_MOVE_FILTERS == 6,
-    "legal_moves' filter list changed -- revisit freeze_captures' four-mechanism enumeration",
+    "move_survives' filter list changed -- revisit freeze_captures' four-mechanism enumeration",
 );
 
 fn freeze_captures(

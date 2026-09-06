@@ -65,17 +65,24 @@ pub fn apply_move_only(pos: &Position, mv: &PieceMove) -> Position {
     next
 }
 
-/// How many distinct filters `legal_moves` applies to a pseudo-legal move. Pinned by
-/// a static assertion in `spell_delta`, which enumerates all of them; see the mapping
-/// table above the filter chain below.
+/// How many distinct filters `move_survives` applies to a pseudo-legal move. Pinned
+/// by a static assertion in `spell_delta`, which enumerates all of them; see the
+/// mapping table above the filter chain below.
 pub(crate) const LEGAL_MOVE_FILTERS: usize = 6;
 
-pub fn legal_moves(pos: &Position) -> Vec<PieceMove> {
-    let mover = pos.side_to_move;
+pub(crate) struct LegalCtx {
+    mover: Color,
+    enemy: Color,
+    king_sq: Square,
+    checker_count: u32,
+    checkers: Bitboard,
+    pins: PinMap,
+    jump: Bitboard,
+}
+
+fn legal_ctx(pos: &Position, mover: Color) -> Option<LegalCtx> {
     let enemy = mover.opposite();
-    let Some(king_sq) = pos.board.king_square(mover) else {
-        return Vec::new();
-    };
+    let king_sq = pos.board.king_square(mover)?;
     let frozen = crate::spells::frozen_bb(pos);
     let jump = crate::spells::jump_bb(pos);
     let occ = pos.board.occupancy();
@@ -83,75 +90,79 @@ pub fn legal_moves(pos: &Position) -> Vec<PieceMove> {
     let checkers = crate::attacks::attackers_to(pos, king_sq, enemy, frozen, slider_occ);
     let checker_count = checkers.count();
     let pins = pins_of(pos, king_sq, mover, frozen, jump);
+    Some(LegalCtx { mover, enemy, king_sq, checker_count, checkers, pins, jump })
+}
 
-    // FILTER LIST -- keep in step with `spell_delta::freeze_captures`, whose entire
-    // correctness argument is an enumeration of these. Freeze never changes
-    // reachability, so every capture a freeze newly makes legal is a move that was
-    // already pseudo-legal and that one of the six filters below used to reject.
-    // `freeze_captures` either models that filter or declines to `NeedsRescan`:
-    //
-    //   1. enemy-king capture, `after_count <= before_count.max(1)`  -> declined
-    //      (freeze_captures' "mechanism 4" guard)
-    //   2. en passant clone-and-rescan                               -> declined
-    //      (its `pos.en_passant.is_some()` guard)
-    //   3. king move, `king_dest_safe`                               -> MODELLED
-    //      (its mechanism 3)
-    //   4. `checker_count >= 2`                                      -> declined
-    //      (its `ctx.checkers` non-empty guard)
-    //   5. pin ray, plus the live-jump-square clone-and-rescan arm   -> MODELLED
-    //      (its mechanism 2) / declined (its `jump_enemy` guard)
-    //   6. `checker_count == 1`, `evasion_allows`                    -> declined
-    //      (the same `ctx.checkers` guard)
-    //
-    // Changing this list means `LEGAL_MOVE_FILTERS` above no longer matches and
-    // `spell_delta`'s static assertion fails the build. That is a tripwire, not a
-    // proof -- it only fires if you update the count, and the differential batteries
-    // only catch a missed filter when they happen to generate the geometry. Read
-    // `freeze_captures`' doc comment before touching anything here.
-    pseudo_legal_moves(pos)
-        .into_iter()
-        .filter(|mv| {
-            let dest_piece = pos.board.get(mv.to);
-            if dest_piece.is_some_and(|p| p.kind == PieceKind::King && p.color == enemy) {
-                let after = apply_move_only(pos, mv);
-                let after_sq = after.board.king_square(mover).expect("own king remains");
-                let before_count = crate::attacks::attacker_count(pos, king_sq, enemy);
-                let after_count = crate::attacks::attacker_count(&after, after_sq, enemy);
-                return after_count <= before_count.max(1);
-            }
-            if mv.is_en_passant {
-                let after = apply_move_only(pos, mv);
-                return !crate::attacks::is_square_attacked(&after, after.board.king_square(mover).unwrap(), enemy);
-            }
-            let mover_piece = pos.board.get(mv.from).unwrap();
-            if mover_piece.kind == PieceKind::King {
-                return king_dest_safe(pos, king_sq, mv.to, enemy);
-            }
-            if checker_count >= 2 {
-                return false;
-            }
-            if let Some(ray) = pin_ray(&pins, mv.from) {
-                if !ray.contains(mv.to) {
-                    return false;
-                }
-                // Landing on a jump square stays transparent. Capturing a jumped
-                // *pinner* can still be legal; capturing a jumped *between* piece
-                // is not. Clone-and-rescan distinguishes those.
-                if jump.contains(mv.to) {
-                    let after = apply_move_only(pos, mv);
-                    return after
-                        .board
-                        .king_square(mover)
-                        .is_none_or(|k| !crate::attacks::is_square_attacked(&after, k, enemy));
-                }
-            }
-            if checker_count == 1 {
-                let checker = checkers.iter().next().unwrap();
-                return evasion_allows(pos, king_sq, checker, mv.to, jump);
-            }
-            true
-        })
-        .collect()
+// FILTER LIST -- keep in step with `spell_delta::freeze_captures`, whose entire
+// correctness argument is an enumeration of these. Freeze never changes
+// reachability, so every capture a freeze newly makes legal is a move that was
+// already pseudo-legal and that one of the six filters below used to reject.
+// `freeze_captures` either models that filter or declines to `NeedsRescan`:
+//
+//   1. enemy-king capture, `after_count <= before_count.max(1)`  -> declined
+//      (freeze_captures' "mechanism 4" guard)
+//   2. en passant clone-and-rescan                               -> declined
+//      (its `pos.en_passant.is_some()` guard)
+//   3. king move, `king_dest_safe`                               -> MODELLED
+//      (its mechanism 3)
+//   4. `checker_count >= 2`                                      -> declined
+//      (its `ctx.checkers` non-empty guard)
+//   5. pin ray, plus the live-jump-square clone-and-rescan arm   -> MODELLED
+//      (its mechanism 2) / declined (its `jump_enemy` guard)
+//   6. `checker_count == 1`, `evasion_allows`                    -> declined
+//      (the same `ctx.checkers` guard)
+//
+// Changing this list means `LEGAL_MOVE_FILTERS` above no longer matches and
+// `spell_delta`'s static assertion fails the build. That is a tripwire, not a
+// proof -- it only fires if you update the count, and the differential batteries
+// only catch a missed filter when they happen to generate the geometry. Read
+// `freeze_captures`' doc comment before touching anything here.
+fn move_survives(pos: &Position, mv: &PieceMove, ctx: &LegalCtx) -> bool {
+    let dest_piece = pos.board.get(mv.to);
+    if dest_piece.is_some_and(|p| p.kind == PieceKind::King && p.color == ctx.enemy) {
+        let after = apply_move_only(pos, mv);
+        let after_sq = after.board.king_square(ctx.mover).expect("own king remains");
+        let before_count = crate::attacks::attacker_count(pos, ctx.king_sq, ctx.enemy);
+        let after_count = crate::attacks::attacker_count(&after, after_sq, ctx.enemy);
+        return after_count <= before_count.max(1);
+    }
+    if mv.is_en_passant {
+        let after = apply_move_only(pos, mv);
+        return !crate::attacks::is_square_attacked(&after, after.board.king_square(ctx.mover).unwrap(), ctx.enemy);
+    }
+    let mover_piece = pos.board.get(mv.from).unwrap();
+    if mover_piece.kind == PieceKind::King {
+        return king_dest_safe(pos, ctx.king_sq, mv.to, ctx.enemy);
+    }
+    if ctx.checker_count >= 2 {
+        return false;
+    }
+    if let Some(ray) = pin_ray(&ctx.pins, mv.from) {
+        if !ray.contains(mv.to) {
+            return false;
+        }
+        // Landing on a jump square stays transparent. Capturing a jumped
+        // *pinner* can still be legal; capturing a jumped *between* piece
+        // is not. Clone-and-rescan distinguishes those.
+        if ctx.jump.contains(mv.to) {
+            let after = apply_move_only(pos, mv);
+            return after
+                .board
+                .king_square(ctx.mover)
+                .is_none_or(|k| !crate::attacks::is_square_attacked(&after, k, ctx.enemy));
+        }
+    }
+    if ctx.checker_count == 1 {
+        let checker = ctx.checkers.iter().next().unwrap();
+        return evasion_allows(pos, ctx.king_sq, checker, mv.to, ctx.jump);
+    }
+    true
+}
+
+pub fn legal_moves(pos: &Position) -> Vec<PieceMove> {
+    let mover = pos.side_to_move;
+    let Some(ctx) = legal_ctx(pos, mover) else { return Vec::new() };
+    pseudo_legal_moves(pos).into_iter().filter(|mv| move_survives(pos, mv, &ctx)).collect()
 }
 
 pub(crate) struct PinMap {
