@@ -30,7 +30,7 @@ pub mod spell_delta;
 pub use spell_delta::{captures_enabled_by, Delta};
 
 pub mod legal;
-pub use legal::{Turn, SpellCast, generate_turns, generate_search_turns, generate_search_spell_turns, generate_quiescence_turns, generate_quiescence_turns_from, generate_quiescence_recapture_turns, legal_moves, apply_move_only, apply_turn};
+pub use legal::{Turn, SpellCast, generate_turns, generate_search_turns, generate_search_spell_turns, generate_quiescence_turns, generate_quiescence_turns_from, generate_quiescence_recapture_turns, legal_moves, legal_captures, apply_move_only, apply_turn};
 
 pub mod terminal;
 pub use terminal::{GameStatus, game_status};

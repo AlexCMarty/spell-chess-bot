@@ -1,6 +1,6 @@
 use crate::bitboard::Bitboard;
 use crate::position::{Position, SpellField, SpellKind};
-use crate::movegen::{pseudo_legal_moves, PieceMove};
+use crate::movegen::{pseudo_legal_captures, pseudo_legal_moves, PieceMove};
 use crate::types::{Color, Piece, PieceKind, Square};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +163,12 @@ pub fn legal_moves(pos: &Position) -> Vec<PieceMove> {
     let mover = pos.side_to_move;
     let Some(ctx) = legal_ctx(pos, mover) else { return Vec::new() };
     pseudo_legal_moves(pos).into_iter().filter(|mv| move_survives(pos, mv, &ctx)).collect()
+}
+
+pub fn legal_captures(pos: &Position) -> Vec<PieceMove> {
+    let mover = pos.side_to_move;
+    let Some(ctx) = legal_ctx(pos, mover) else { return Vec::new() };
+    pseudo_legal_captures(pos).into_iter().filter(|mv| move_survives(pos, mv, &ctx)).collect()
 }
 
 pub(crate) struct PinMap {
@@ -1230,5 +1236,138 @@ mod tests {
         });
         assert!(!dests(&pos_g1, Square::from_str("e1").unwrap()).contains(&Square::from_str("g1").unwrap()));
         assert!(dests(&pos_g1, Square::from_str("e1").unwrap()).contains(&Square::from_str("c1").unwrap()));
+    }
+
+    #[test]
+    fn legal_captures_matches_legal_moves_filtered_to_captures_ordered() {
+        fn splitmix64(state: &mut u64) -> u64 {
+            *state = state.wrapping_add(0x9E3779B97F4A7C15);
+            let mut z = *state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            z ^ (z >> 31)
+        }
+        fn random_legal_walk(seed: u64, plies: u32) -> Vec<Position> {
+            let mut state = seed;
+            let mut pos = Position::starting();
+            let mut out = vec![pos];
+            for _ in 0..plies {
+                let turns = crate::legal::generate_turns(&pos);
+                if turns.is_empty() {
+                    break;
+                }
+                let pick = (splitmix64(&mut state) as usize) % turns.len();
+                pos = crate::legal::apply_turn(&pos, &turns[pick]);
+                if pos.board.king_square(Color::White).is_none() || pos.board.king_square(Color::Black).is_none() {
+                    break;
+                }
+                out.push(pos);
+            }
+            out
+        }
+
+        let mut battery = vec![Position::starting()];
+        for seed in [1u64, 7, 42, 1234] {
+            battery.extend(random_legal_walk(seed, 12));
+        }
+
+        for pos in battery {
+            let expected: Vec<PieceMove> = legal_moves(&pos).into_iter().filter(|mv| is_capture(&pos, mv)).collect();
+            let actual = legal_captures(&pos);
+            assert_eq!(actual, expected, "legal_captures diverged from legal_moves-filtered-to-captures");
+        }
+    }
+
+    #[test]
+    fn legal_captures_only_king_survives_in_double_check() {
+        // Bd7 and Re1 both attack e8: double check. Kxd7 is undefended and safe, so
+        // it must survive; Black's knight also has a pseudo-legal Nxg6, which must
+        // be filtered out since only king moves are legal under double check.
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d7").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Bishop }));
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("g6").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("h8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Knight }));
+        pos.side_to_move = Color::Black;
+        assert!(
+            crate::attacks::attacker_count(&pos, Square::from_str("e8").unwrap(), Color::White) >= 2,
+            "fixture is wrong: this must be a double check",
+        );
+        let caps = legal_captures(&pos);
+        let kxd7 = PieceMove::quiet(Square::from_str("e8").unwrap(), Square::from_str("d7").unwrap());
+        let nxg6 = PieceMove::quiet(Square::from_str("h8").unwrap(), Square::from_str("g6").unwrap());
+        assert!(caps.contains(&kxd7), "Kxd7 must survive: it resolves both checks and is undefended");
+        assert!(!caps.contains(&nxg6), "Nxg6 must be filtered out under double check");
+    }
+
+    #[test]
+    fn legal_captures_includes_enemy_king_capture_via_jump() {
+        // Same geometry as vector_9_king_capture_via_jump.
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d2").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Bishop }));
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("h2").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("b4").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Bishop }));
+        pos.board.set(Square::from_str("a8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
+        pos.side_to_move = Color::Black;
+        pos.fields.push(crate::position::SpellField {
+            square: Square::from_str("d2").unwrap(), owner: Color::Black,
+            kind: crate::position::SpellKind::Jump, expires_after_ply: pos.ply + 1,
+        });
+        let capture = PieceMove::quiet(Square::from_str("b4").unwrap(), Square::from_str("e1").unwrap());
+        assert!(legal_captures(&pos).contains(&capture));
+    }
+
+    #[test]
+    fn legal_captures_includes_slider_capture_through_jump_square() {
+        // Same geometry as vector_10_jump_field_serves_both_players.
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("d4").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
+        pos.fields.push(crate::position::SpellField {
+            square: Square::from_str("d4").unwrap(), owner: Color::White,
+            kind: crate::position::SpellKind::Jump, expires_after_ply: pos.ply + 1,
+        });
+        let capture = PieceMove::quiet(Square::from_str("d1").unwrap(), Square::from_str("d8").unwrap());
+        assert!(legal_captures(&pos).contains(&capture));
+    }
+
+    #[test]
+    fn legal_captures_declines_pinned_piece_capturing_onto_live_jump_square() {
+        // Same geometry as spell_delta.rs's a_pinned_slider_capturing_onto_a_live_jump_square_declines:
+        // after jump@e3, Re2 is pseudo-legally able to take Ne4, but Ne4 sits on a
+        // still-transparent square so Re5 sees straight through to Ke1 -- Rxe4 must
+        // not be legal.
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("e2").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("e3").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("e4").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Knight }));
+        pos.board.set(Square::from_str("e5").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("a8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.fields.push(crate::position::SpellField {
+            square: Square::from_str("e4").unwrap(), owner: Color::Black,
+            kind: crate::position::SpellKind::Jump, expires_after_ply: pos.ply + 1,
+        });
+        let cast = SpellCast { kind: crate::position::SpellKind::Jump, square: Square::from_str("e3").unwrap() };
+        let hypothetical = position_with_field(&pos, cast);
+        let rxe4 = PieceMove::quiet(Square::from_str("e2").unwrap(), Square::from_str("e4").unwrap());
+        assert!(!legal_captures(&hypothetical).contains(&rxe4), "Rxe4 must decline: it lands on a still-transparent square");
+    }
+
+    #[test]
+    fn legal_captures_empty_when_mover_has_no_king() {
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.side_to_move = Color::White;
+        assert!(legal_moves(&pos).is_empty());
+        assert!(legal_captures(&pos).is_empty());
     }
 }
