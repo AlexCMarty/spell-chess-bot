@@ -674,8 +674,12 @@ fn generate_quiescence_inner(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn
                     }
                     crate::spell_delta::Delta::NeedsRescan => {
                         crate::qtime!(JUMP_RESCAN, {
-                            for mv in legal_moves(&position_with_field(pos, cast)) {
-                                if is_capture(pos, &mv) && !in_baseline(baseline, mv) {
+                            // `legal_captures` decides captures against `hypo`, not `pos` --
+                            // sound only because `position_with_field` touches `fields` alone,
+                            // so `board` and `en_passant` (and therefore what counts as a
+                            // capture) are identical on both positions.
+                            for mv in legal_captures(&position_with_field(pos, cast)) {
+                                if !in_baseline(baseline, mv) {
                                     turns.push(Turn { spell: Some(cast), mv });
                                 }
                             }
@@ -714,8 +718,12 @@ fn generate_quiescence_inner(pos: &Position, baseline: &[PieceMove]) -> Vec<Turn
                         }
                         crate::spell_delta::Delta::NeedsRescan => {
                             crate::qtime!(FREEZE_RESCAN, {
-                                for mv in legal_moves(&position_with_field(pos, cast)) {
-                                    if is_capture(pos, &mv) && !in_baseline(baseline, mv) {
+                                // See the identical comment on the JUMP_RESCAN arm above:
+                                // position_with_field only touches `fields`, so testing
+                                // captures against `hypo` here is equivalent to testing them
+                                // against `pos`.
+                                for mv in legal_captures(&position_with_field(pos, cast)) {
+                                    if !in_baseline(baseline, mv) {
                                         turns.push(Turn { spell: Some(cast), mv });
                                     }
                                 }
@@ -1369,5 +1377,34 @@ mod tests {
         pos.side_to_move = Color::White;
         assert!(legal_moves(&pos).is_empty());
         assert!(legal_captures(&pos).is_empty());
+    }
+
+    #[test]
+    fn quiescence_offers_a_capture_that_only_exists_after_freeze_dispels_check() {
+        // Black's king is in contact check from White's rook on d8. Bxg6 is not
+        // legal yet -- it doesn't address the check. Freezing d8 (the checker)
+        // dispels the check (a frozen piece exerts no control at all), after which
+        // Bxg6 is legal. This is exactly the 81%-of-cases FREEZE_RESCAN shape
+        // measured this session: `captures_enabled_by` always declines to
+        // NeedsRescan whenever the mover is already in check, so this fixture
+        // exercises the arm Task 5 changed, not the FREEZE_DELTA fast path.
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d8").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("g6").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Pawn }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("f7").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Bishop }));
+        pos.side_to_move = Color::Black;
+
+        let baseline = legal_moves(&pos);
+        let bxg6 = PieceMove::quiet(Square::from_str("f7").unwrap(), Square::from_str("g6").unwrap());
+        assert!(!baseline.contains(&bxg6), "fixture is wrong: Bxg6 must not address the check and so must start illegal");
+
+        let cast = SpellCast { kind: crate::position::SpellKind::Freeze, square: Square::from_str("d8").unwrap() };
+        let turns = generate_quiescence_turns_from(&pos, &baseline);
+        assert!(
+            turns.iter().any(|t| t.spell == Some(cast) && t.mv == bxg6),
+            "freeze@d8 + Bxg6 must appear: freezing the checker dispels check and newly legalizes the bishop capture",
+        );
     }
 }
