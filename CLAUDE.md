@@ -1,7 +1,18 @@
 This is a project to create a bot that can beat humans at the game of Spell Chess at `https://www.chess.com/variants/spell-chess/analysis`!
 
 **Only ever open `https://www.chess.com/variants/spell-chess/analysis`.** Other pages can
-match you into a game against a human, which would be a terms-of-service violation.
+match you into a game against a human, which would be a terms-of-service violation. This is
+enforced by a `PreToolUse` hook (`.claude/hooks/guard-chesscom-url.py`), not just by this
+paragraph — if it blocks you, it is right and you should not work around it.
+
+## Where knowledge lives
+
+- [`rules/INDEX.md`](rules/INDEX.md) — the rules. Read before writing move-generation code.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the ~9,600 lines fit together, and
+  which two files hold most of the difficulty.
+- `/perf-measurement` skill — before benchmarking or optimizing anything.
+- `/spell-legality-testing` skill — before touching freeze/jump legality or its tests.
+- GitHub issues — the open backlog, including work deliberately paused.
 
 ## Workspace
 
@@ -41,6 +52,19 @@ disagree, code wins.
 - **Checkmate is not checkmate** while the defender still holds an unlocked spell that could
   produce a legal move.
 - Spell counts never replenish; only the cooldown resets.
+
+## Hard rules
+
+- **A performance change must leave node/qnode counts bit-identical.** If they move, you
+  changed the search tree, not the cost per node — that needs correctness review, not a
+  benchmark. Speed work must not narrow the tree.
+- **Never delete the slow rescan path.** It is the differential oracle the fast paths in
+  `spell_delta.rs` are tested against. A fast path that cannot model a geometry returns
+  `Delta::NeedsRescan`; it does not guess.
+- **Use `--no-fail-fast` for mutation testing.** Plain `cargo test` stops at the first
+  failing target and will mis-attribute kills.
+- `cargo` may be at `~/.cargo/bin/cargo` and not on `PATH`. Release builds take a couple of
+  minutes and a depth-8 benchmark ~90–150s — budget long timeouts rather than assuming a hang.
 
 ## Commits
 

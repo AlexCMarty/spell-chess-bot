@@ -5,6 +5,14 @@ research/variants.pretty.js
 
 # local git worktrees used for isolated feature work
 .worktrees/
+.claude/worktrees/
+
+# scratch state from agent-driven development runs (task briefs, review diffs)
+.superpowers/
+
+# personal Claude Code settings; the shared ones are in .claude/settings.json
+.claude/settings.local.json
+CLAUDE.local.md
 
 # Rust build artifacts
 target/
