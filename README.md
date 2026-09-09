@@ -3,7 +3,51 @@
 Goal: a bot that beats humans at [Spell Chess](https://www.chess.com/variants/spell-chess),
 chess.com's chess variant with castable spells.
 
-## Start here
+**If you're driving this repo's tooling (or an AI agent) against chess.com, only ever open
+`https://www.chess.com/variants/spell-chess/analysis`.** Other pages can match an automated
+client into a live game against a human, which would be a terms-of-service violation.
+
+## What's here
+
+A Rust workspace with a rules-accurate move generator, a parallel alpha-beta search, and a
+REPL to drive both:
+
+| Crate | Covers |
+|---|---|
+| [`crates/core`](crates/core) | Board representation, legal move/spell generation, the rules engine. No internal deps. |
+| [`crates/search`](crates/search) | Alpha-beta search with quiescence and Lazy-SMP, built on `core`. |
+| [`crates/cli`](crates/cli) | The `spellchess` binary: a REPL for playing out positions and asking the engine for a move. |
+
+## Build and run
+
+```sh
+cargo build --workspace
+cargo test --workspace
+cargo run --release -p spellchess-cli
+```
+
+The REPL takes one command per line:
+
+```
+> newgame
+> board                       # render the current position
+> e2e4                        # play a move
+> freeze@d5 g8f6              # cast a spell, then move
+> go --depth 8                # ask the engine for its best turn
+> go --time 5                 # or budget by seconds
+> undo
+```
+
+For raw search performance, use the `bench` example rather than the CLI binary — it isolates
+the search from the REPL and avoids comparing against a stale build (see the doc comment in
+[`crates/search/examples/bench.rs`](crates/search/examples/bench.rs) for why that distinction
+matters):
+
+```sh
+cargo run --release -p spellchess-search --example bench -- 8
+```
+
+## Start here for the rules
 
 **[`rules/INDEX.md`](rules/INDEX.md)** — the rule corpus. It is a routing index; read it
 first and it will send you to the one file that answers your question.
@@ -46,5 +90,6 @@ you know what is load-bearing.
 `rules/70-engine-api.md` has a copy-pasteable harness for running chess.com's engine in the
 browser. Use it to validate any move generator you write.
 
-**Only ever open `https://www.chess.com/variants/spell-chess/analysis`.** Other pages can
-match you into a game against a human, which would be a terms-of-service violation.
+## License
+
+[MIT](LICENSE)
