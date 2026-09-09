@@ -18,6 +18,10 @@ REPL to drive both:
 | [`crates/search`](crates/search) | Alpha-beta search with quiescence and Lazy-SMP, built on `core`. |
 | [`crates/cli`](crates/cli) | The `spellchess` binary: a REPL for playing out positions and asking the engine for a move. |
 
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) explains how those fit together, which two
+files hold most of the difficulty, and the invariants a change has to preserve. Read it
+before making a non-trivial change.
+
 ## Build and run
 
 ```sh
@@ -87,8 +91,36 @@ you know what is load-bearing.
 
 ## Working on this repo
 
-`rules/70-engine-api.md` has a copy-pasteable harness for running chess.com's engine in the
-browser. Use it to validate any move generator you write.
+[`rules/70-engine-api.md`](rules/70-engine-api.md) has a copy-pasteable harness for running
+chess.com's engine in the browser. Use it to validate any move generator you write.
+
+Two things are worth knowing before you optimize or touch spell legality, because both
+have burned this project repeatedly:
+
+- **A performance change must leave node/qnode counts bit-identical.** If they move, you
+  changed the search tree rather than the cost per node.
+- **Random fuzzing does not find legality bugs here.** Every one this project has shipped
+  was caught by a hand-built adversarial position or by mutation-testing a guard. The
+  generated batteries are a regression net.
+
+If you use Claude Code, both are written up as skills in `.claude/skills/` and load
+automatically when relevant. The repo also ships a `PreToolUse` hook that blocks any
+chess.com URL other than the analysis board — you will be asked to trust it on first run.
+Verify it with `bash .claude/hooks/test-guard-chesscom-url.sh`.
+
+### The engine bundle
+
+`research/variants.js` is chess.com's own client engine. It is third-party copyrighted
+code, so it is **gitignored and never redistributed** — you fetch your own copy:
+
+```sh
+mkdir -p research && cd research
+curl -O https://www.chess.com/r2/client-packages/variants/2026.8.1/variants.js
+```
+
+The version string moves; check the analysis page's network tab if that path 404s. Nothing
+in `cargo test --workspace` needs this file — it is only for re-deriving or re-verifying
+rules against the real engine.
 
 ## License
 
