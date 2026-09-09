@@ -1,9 +1,8 @@
 use crate::position::SpellField;
 
 /// Fixed-capacity, `Copy` replacement for `Vec<SpellField>`. Capacity 4 gives a 2x
-/// margin over the demonstrated momentary maximum of 2 concurrent fields (see
-/// docs/superpowers/specs/2026-08-13-search-move-ordering-and-field-repr-design.md's
-/// "Concurrency bound" section) -- steady-state is at most 1.
+/// margin over the demonstrated momentary maximum of 2 concurrent fields --
+/// steady-state is at most 1.
 ///
 /// `push` always fills the first `None` slot, and `retain` always compacts surviving
 /// fields to the front in their original relative order (no gaps left behind). This

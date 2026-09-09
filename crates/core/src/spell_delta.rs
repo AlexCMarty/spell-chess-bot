@@ -2,7 +2,9 @@
 //! the "build a hypothetical position and run a full `legal_moves` rescan" approach
 //! that dominated search time (36-41us per leaf node).
 //!
-//! See docs/superpowers/specs/2026-09-01-spell-capture-delta-design.md.
+//! The slow rescan is deliberately kept as the differential oracle, and this fast path
+//! may decline any geometry it cannot model by returning `Delta::NeedsRescan` rather
+//! than guessing. See docs/ARCHITECTURE.md, "The fast-path / oracle pattern".
 
 use crate::attacks::attackers_to;
 use crate::bitboard::Bitboard;
@@ -70,8 +72,7 @@ fn slider_scan(board: &Board, us: Color, frozen: Bitboard, slider_occ: Bitboard)
 }
 
 /// Squares whose jump could add a new attacker on our king, precomputed once
-/// per node (see docs/superpowers/specs/2026-09-02-jump-exposure-precompute-
-/// and-fuzz-harness-design.md). Jump only grants slider transparency, so the
+/// per node. Jump only grants slider transparency, so the
 /// only way it can add a checker is: `blocker` is the first REAL (non-
 /// transparent) piece on one of the king's 8 rook/bishop lines, and beyond it
 /// -- skipping over any square that already has a live jump field of its own,

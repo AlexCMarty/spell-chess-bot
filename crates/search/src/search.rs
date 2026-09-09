@@ -873,8 +873,7 @@ mod tests {
         // to prove the iterative-deepening loop in `search()` completes correctly across
         // 2 plies. `depth_three_search_completes_quickly_on_a_realistic_board` below is
         // the stress test on a fully-populated board, now that spell candidate generation
-        // is relevance-filtered (see
-        // docs/superpowers/specs/2026-08-12-search-branching-factor-design.md).
+        // is relevance-filtered.
         let mut pos = Position { board: Board::empty(), ..Position::starting() };
         pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
         pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));

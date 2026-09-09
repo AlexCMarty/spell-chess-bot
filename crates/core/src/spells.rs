@@ -185,8 +185,7 @@ fn mark_jump_relevant_squares(scan_pos: &Position, castable_at: &Position, relev
 /// A jump cast only changes anything if the target is the first blocker on some
 /// slider's ray (either color), a slider's own square (see
 /// `mark_jump_relevant_squares`'s self-hiding note), or a pawn's double-step mid
-/// square (either color) -- see
-/// docs/superpowers/specs/2026-08-12-search-branching-factor-design.md.
+/// square (either color).
 ///
 /// All three are checked on the current board *and* on the board as it would look
 /// after each of the mover's own candidate moves this turn: a slider arriving at
@@ -213,8 +212,7 @@ pub fn relevant_jump_targets(pos: &Position, color: Color, baseline: &[PieceMove
 
 /// A freeze cast only changes anything if its 3x3 zone touches a square that's
 /// either occupied now or reachable by one of the mover's own legal moves this
-/// turn (including a castling move's rook-landing square) -- see
-/// docs/superpowers/specs/2026-08-12-search-branching-factor-design.md.
+/// turn (including a castling move's rook-landing square).
 pub fn relevant_freeze_targets(pos: &Position, color: Color, baseline: &[PieceMove]) -> Vec<Square> {
     if !pos.spells(color).freeze.castable() {
         return Vec::new();
