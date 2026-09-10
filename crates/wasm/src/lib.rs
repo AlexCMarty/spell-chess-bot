@@ -1,2 +1,2 @@
-mod json;
-mod view;
+pub mod json;
+pub mod view;

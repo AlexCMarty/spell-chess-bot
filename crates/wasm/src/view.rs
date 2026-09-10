@@ -260,6 +260,36 @@ mod tests {
     }
 
     #[test]
+    fn parse_promo_maps_letters_to_variants_and_rejects_junk() {
+        assert_eq!(parse_promo(None).unwrap(), None);
+        assert_eq!(parse_promo(Some("q")).unwrap(), Some(Promotion::Queen));
+        assert_eq!(parse_promo(Some("r")).unwrap(), Some(Promotion::Rook));
+        assert_eq!(parse_promo(Some("b")).unwrap(), Some(Promotion::Bishop));
+        assert_eq!(parse_promo(Some("n")).unwrap(), Some(Promotion::Knight));
+        assert!(parse_promo(Some("k")).is_err());
+        assert!(parse_promo(Some("")).is_err());
+    }
+
+    /// `turn_json`'s `Some(p)` promo branch, exercised via a directly-constructed
+    /// `Turn` rather than a search for a promoting position -- `turn_json` is a
+    /// pure function of a `Turn`, so this is a legitimate and much simpler input.
+    #[test]
+    fn turn_json_renders_a_promotion_letter() {
+        use spellchess_core::PieceMove;
+
+        let mv = PieceMove {
+            from: Square::from_str("e7").unwrap(),
+            to: Square::from_str("e8").unwrap(),
+            promotion: Some(Promotion::Queen),
+            is_en_passant: false,
+            is_castle: false,
+        };
+        let turn = Turn { spell: None, mv };
+        let out = turns_json(&[turn]);
+        assert!(out.contains(r#""promo":"q""#), "got {out}");
+    }
+
+    #[test]
     fn parse_spell_requires_both_halves() {
         assert!(parse_spell(None, None).unwrap().is_none());
         let cast = parse_spell(Some("freeze"), Some("e6")).unwrap().unwrap();
