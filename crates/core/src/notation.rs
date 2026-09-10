@@ -212,7 +212,7 @@ mod tests {
     }
 
     /// Exhaustive version of the sample above (~35s per position in a debug build).
-    /// Run with `cargo test -p spellchess-cli -- --ignored`.
+    /// Run with `cargo test -p spellchess-core -- --ignored`.
     #[test]
     #[ignore = "slow: ~80s in a debug build"]
     fn every_generated_turn_round_trips_on_full_boards() {
