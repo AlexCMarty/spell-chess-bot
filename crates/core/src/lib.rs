@@ -21,6 +21,9 @@ pub mod rays;
 pub mod movegen;
 pub use movegen::{PieceMove, Promotion, pseudo_legal_moves};
 
+pub mod notation;
+pub use notation::{parse_turn, format_turn};
+
 pub mod attacks;
 pub use attacks::{attacker_count, attackers_to, is_square_attacked};
 
