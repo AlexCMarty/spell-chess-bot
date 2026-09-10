@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use crate::clock::{Duration, Instant};
 use spellchess_core::{apply_turn, generate_quiescence_recapture_turns, generate_quiescence_turns_from, generate_search_spell_turns, generate_search_turns, legal_moves, Color, PieceKind, Position, Turn};
 use crate::eval::{evaluate, piece_value};
 use crate::tables::{HistoryTable, KillerTable};
