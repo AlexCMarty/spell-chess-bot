@@ -21,6 +21,31 @@
 - **Square index convention:** `Square(rank * 8 + file)`, so index 0 is a1 and index 63 is h8. `Square` implements `Display` as algebraic notation, and `Square::from_str("e4") -> Option<Square>` parses it back.
 - **Existing suites must stay green:** `cargo test --workspace` after every task.
 
+## Browser Verification
+
+Tasks 7, 8, and 10 say "open it in a browser and walk this checklist." The driver
+is the **`open-claude-in-chrome` MCP**, verified operational on this machine
+against a local static server. What was confirmed, and the three traps found:
+
+- **Module workers, `WebAssembly.instantiate`, and `wasm-pack --target web`
+  output all load and run** from `python3 -m http.server -d web 8099`. No flags,
+  no HTTPS needed for `localhost`.
+- **`computer` screenshots fail with `CDP Page.captureScreenshot timed out`
+  unless the tab is the active tab in its window.** Call `set_tab_focus` once
+  first; after that, screenshots and coordinate clicks work.
+- **`find` does not see the board.** Task 6 renders squares as
+  `<div data-square="e2">` — no interactive role, so natural-language element
+  search returns nothing. Drive the board with `javascript_tool` instead:
+  `document.querySelector('[data-square="e2"]').click()`. A programmatic
+  `.click()` bubbles, so Task 6's delegated listener fires correctly. This is
+  more reliable than coordinate clicks and needs no screenshot.
+- **`javascript_tool` reports thrown errors as a bare `Uncaught`** with no
+  message. If a snippet fails, bisect it into single expressions rather than
+  guessing — a `null` from `querySelector` looks identical to a tool failure.
+- `read_console_messages` (with `onlyErrors: true`) covers the "console is free
+  of errors" checks, and `debug` with `kind: "hit"` confirms what a click
+  actually landed on.
+
 ## File Structure
 
 | Path | Responsibility |
@@ -32,6 +57,7 @@
 | `crates/wasm/src/json.rs` | **New.** Minimal JSON string builder. No serde — keeps the wasm binary small. |
 | `crates/wasm/src/view.rs` | **New.** Pure functions turning `Position`/`Turn` into JSON and parsing boundary arguments. No `wasm_bindgen` types, so it is fully testable on the native target. |
 | `crates/wasm/src/lib.rs` | **New.** The `#[wasm_bindgen] Game` shell. Thin — delegates to `view.rs`. |
+| `web/clockbench.html` | **New.** Throwaway measurement page for Task 5's deadline-check overhead. Not part of the site. |
 | `web/index.html` | **New.** Page skeleton. |
 | `web/style.css` | **New.** Board, spell tray, panel styling. |
 | `web/app.js` | **New.** View rendering and input handling. Holds no authoritative game state. |
@@ -870,7 +896,7 @@ end cannot submit an illegal turn."
 
 **Interfaces:**
 - Consumes: everything `view.rs` produces (Task 4); `spellchess_search::search::{search_with_progress, Budget}` (Task 3).
-- Produces, as JavaScript on the `Game` class: `new Game()`, `reset()`, `undo() -> bool`, `state_json() -> string`, `legal_turns_json() -> string`, `apply_turn(from, to, promo, spell_kind, spell_at) -> string` (throws on error), `search(millis, on_progress) -> string`.
+- Produces, as JavaScript on the `Game` class: `new Game()`, `reset()`, `undo() -> bool`, `state_json() -> string`, `legal_turns_json() -> string`, `apply_turn(from, to, promo, spell_kind, spell_at) -> string` (throws on error), `search(millis, on_progress) -> string`. Also a module-level `bench_clock(iters) -> number`, used only by the Step 5 overhead measurement.
 
 - [ ] **Step 1: Write `lib.rs`**
 
@@ -890,7 +916,7 @@ mod view;
 mod bindings {
     use crate::view;
     use spellchess_core::{apply_turn, Position};
-    use spellchess_search::clock::Duration;
+    use spellchess_search::clock::{Duration, Instant};
     use spellchess_search::search::{search_with_progress, Budget};
     use wasm_bindgen::prelude::*;
 
@@ -899,6 +925,35 @@ mod bindings {
     #[wasm_bindgen(start)]
     pub fn start() {
         console_error_panic_hook::set_once();
+    }
+
+    /// Nanoseconds per `timed_out()` clock read.
+    ///
+    /// `Budget::Time` -- the mode the site uses -- leaves `deadline` as `Some`,
+    /// so `Instant::now()` runs once per node *and* once per qnode. Natively
+    /// that is a vDSO read; in the browser it is a JS boundary crossing through
+    /// `performance.now()`. Step 5 sizes that against the search budget.
+    ///
+    /// Measurement only. It shares no state with the search and cannot move a
+    /// node count.
+    #[wasm_bindgen]
+    pub fn bench_clock(iters: u32) -> f64 {
+        let deadline = Instant::now() + Duration::from_secs(3600);
+        let t0 = Instant::now();
+        let mut hits = 0u32;
+        for _ in 0..iters {
+            // Deliberately the exact shape of `timed_out`'s second line.
+            if Instant::now() >= deadline {
+                hits += 1;
+            }
+        }
+        let elapsed = t0.elapsed().as_nanos() as f64;
+        // Keeps the loop observable so LLVM cannot delete it. The deadline is an
+        // hour out, so this never returns -1.
+        if hits > 0 {
+            return -1.0;
+        }
+        elapsed / iters as f64
     }
 
     /// The authoritative game. One of these lives in the Web Worker; the main
@@ -1016,7 +1071,75 @@ cd "/home/alex/Spell Chess" && ls -lh web/pkg/spellchess_wasm_bg.wasm
 
 Record the number. Anything under ~2MB is fine over the wire once gzipped. If it is dramatically larger, report it rather than adding optimisation flags on your own initiative.
 
-- [ ] **Step 5: Confirm native tests still pass**
+- [ ] **Step 5: Measure the deadline-check overhead**
+
+`Budget::Time` keeps `deadline` as `Some`, so `timed_out()` reads the clock once
+per node and once per qnode. Natively that is a vDSO read; through
+`wasm-bindgen` it is a call out to `performance.now()`. This step sizes it
+before Task 10 discovers it as "the browser feels slow".
+
+Create `web/clockbench.html` — a throwaway harness, not part of the site:
+
+```html
+<!doctype html>
+<meta charset="utf-8">
+<title>deadline-check overhead</title>
+<pre id="out">measuring…</pre>
+<script type="module">
+  import init, { bench_clock } from "./pkg/spellchess_wasm.js";
+  await init();
+  bench_clock(200000); // warm up: first calls pay JIT tiering
+  const ns = bench_clock(2000000);
+  // Reference tree size for a depth-6 search from the starting position.
+  // Replace with the real counts from the bench harness below.
+  const nodes = 340000, qnodes = 2380000;
+  const out = {
+    ns_per_clock_read: Number(ns.toFixed(1)),
+    reads_per_search: nodes + qnodes,
+    seconds_of_overhead: Number((ns * (nodes + qnodes) / 1e9).toFixed(3)),
+    percent_of_3s_budget: Number((ns * (nodes + qnodes) / 3e7).toFixed(1)),
+  };
+  document.getElementById("out").textContent = JSON.stringify(out, null, 2);
+  console.log("clockbench:", JSON.stringify(out));
+</script>
+```
+
+Get the real node counts first, then serve the page and read the result:
+
+```bash
+cd "/home/alex/Spell Chess"
+SPELLCHESS_PROFILE=1 ~/.cargo/bin/cargo run --release -p spellchess-search --example bench 2>&1 | tail -20
+python3 -m http.server -d web 8099
+```
+
+Open <http://localhost:8099/clockbench.html>. Substitute the harness's `nodes`
+and `qnodes` into the page if they differ materially from the constants above.
+
+**Reference measurements already taken on this machine** (Raspberry Pi,
+aarch64, Chromium), using a standalone probe of the identical loop:
+
+| Path | ns per clock read |
+|---|---|
+| Native `std::time::Instant` | **39** |
+| wasm `web_time::Instant` via `performance.now()` | **138** |
+
+So expect roughly **3–4× native**, about **0.38s per depth-6 search**, i.e.
+**~12% of a 3s budget**. A result in that range is the expected outcome, not a
+finding.
+
+**Decision rule — read this before acting on the number:**
+
+- **Under ~15% of the budget:** record it and move on. Nothing to do.
+- **15–25%:** record it in the Task 10 report as a known cost. Still do nothing.
+- **Over ~25%:** stop and escalate. The fix would be checking the clock every
+  Nth node instead of every node, and that **changes the search hot loop** —
+  it is gated on bit-identical node/qnode counts and belongs in its own change,
+  reviewed on its own merits.
+
+**Do not modify `timed_out()` or the search hot loop in this task under any
+number.** This step measures; it does not optimise. Report the figure.
+
+- [ ] **Step 6: Confirm native tests still pass**
 
 ```bash
 cd "/home/alex/Spell Chess" && ~/.cargo/bin/cargo test --workspace 2>&1 | tail -15
@@ -1024,16 +1147,19 @@ cd "/home/alex/Spell Chess" && ~/.cargo/bin/cargo test --workspace 2>&1 | tail -
 
 Expected: PASS. The `bindings` module is `cfg(target_arch = "wasm32")`, so it compiles out natively and cannot break the workspace build.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 cd "/home/alex/Spell Chess"
-git add crates/wasm/src/lib.rs .gitignore Cargo.lock
+git add crates/wasm/src/lib.rs web/clockbench.html .gitignore Cargo.lock
 git commit -m "feat(wasm): expose the engine to JavaScript as a Game class
 
 A thin wasm-bindgen shell over the view layer: apply a turn, list legal
 turns, undo, and search with a per-iteration progress callback. Errors
-become JS exceptions rather than silently applying a different turn."
+become JS exceptions rather than silently applying a different turn.
+
+web/clockbench.html measures the per-node deadline check, which costs ~3.5x
+more in wasm than natively because it crosses into performance.now()."
 ```
 
 ---
