@@ -21,3 +21,6 @@ target/
 # already covered by the blanket `target/` rule above.
 crates/core/fuzz/corpus/
 crates/core/fuzz/artifacts/
+
+# wasm-pack output, rebuilt by CI on every deploy
+web/pkg/
