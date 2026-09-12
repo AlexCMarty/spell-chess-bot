@@ -47,6 +47,21 @@ function squareName(index) {
   return FILES[index % 8] + (Math.floor(index / 8) + 1);
 }
 
+/// The 3×3 block a freeze immobilises, clipped to the board -- mirrors the
+/// engine's `freeze_zone` so the tint matches what is actually frozen.
+function freezeZone(square) {
+  const file = FILES.indexOf(square[0]);
+  const rank = Number(square[1]) - 1;
+  const out = [];
+  for (let df = -1; df <= 1; df++) {
+    for (let dr = -1; dr <= 1; dr++) {
+      const f = file + df, r = rank + dr;
+      if (f >= 0 && f < 8 && r >= 0 && r < 8) out.push(FILES[f] + (r + 1));
+    }
+  }
+  return out;
+}
+
 let state = null;
 let legalTurns = [];
 let selected = null;      // square name the user picked a piece on
@@ -88,7 +103,7 @@ function renderBoard() {
   const jumped = new Set();
   for (const f of state.fields) {
     if (f.kind === "jump") jumped.add(f.square);
-    else frozen.add(f.square);
+    else for (const sq of freezeZone(f.square)) frozen.add(sq);
   }
   // Rank 8 first so the DOM reads top-to-bottom the way the board looks.
   for (let rank = 7; rank >= 0; rank--) {
