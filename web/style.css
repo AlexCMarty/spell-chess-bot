@@ -1,0 +1,28 @@
+:root { color-scheme: light dark; --light: #eadfc8; --dark: #9a7b52; --sel: #f2e06a; --tgt: #7fb069; --frozen: #6fa8dc; --jump: #c77dff; }
+* { box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; margin: 0; padding: 1.5rem; }
+main { max-width: 60rem; margin: 0 auto; }
+h1 { font-size: 1.4rem; margin: 0 0 1rem; }
+.layout { display: flex; gap: 1.5rem; flex-wrap: wrap; align-items: flex-start; }
+.board { display: grid; grid-template-columns: repeat(8, 3rem); grid-template-rows: repeat(8, 3rem); border: 2px solid #444; }
+.sq { display: flex; align-items: center; justify-content: center; font-size: 2rem; line-height: 1; cursor: pointer; user-select: none; position: relative; }
+.sq.light { background: var(--light); } .sq.dark { background: var(--dark); }
+.sq.selected { box-shadow: inset 0 0 0 4px var(--sel); }
+.sq.target::after { content: ""; position: absolute; width: 1rem; height: 1rem; border-radius: 50%; background: var(--tgt); opacity: .8; }
+.sq.spell-target { box-shadow: inset 0 0 0 4px var(--jump); }
+.sq.frozen { background-image: linear-gradient(rgba(111,168,220,.55), rgba(111,168,220,.55)); }
+.sq.jumped { background-image: linear-gradient(rgba(199,125,255,.55), rgba(199,125,255,.55)); }
+.sq .piece.white { color: #fff; text-shadow: 0 0 2px #000, 0 0 2px #000; }
+.sq .piece.black { color: #111; text-shadow: 0 0 2px #fff; }
+.side { flex: 1 1 18rem; min-width: 16rem; }
+.spells { margin-bottom: 1rem; }
+.spell-row { display: flex; gap: .5rem; align-items: center; margin: .25rem 0; }
+.spell-row button { min-width: 6rem; }
+.spell-row button[disabled] { opacity: .45; }
+.controls { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-bottom: 1rem; }
+.status { margin-top: .75rem; font-weight: 600; min-height: 1.4em; }
+.analysis { font-variant-numeric: tabular-nums; min-height: 4rem; margin-bottom: 1rem; }
+.analysis table { border-collapse: collapse; width: 100%; }
+.analysis td { padding: .1rem .4rem; }
+.moves { max-height: 14rem; overflow-y: auto; font-variant-numeric: tabular-nums; padding-left: 2.5rem; }
+.error { color: #b00020; font-weight: 600; }

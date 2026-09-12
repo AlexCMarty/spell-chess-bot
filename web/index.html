@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spell Chess</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<main>
+  <h1>Spell Chess</h1>
+  <p id="error" class="error" hidden></p>
+  <div class="layout">
+    <div>
+      <div id="board" class="board"></div>
+      <p id="status" class="status">Loading engine…</p>
+    </div>
+    <aside class="side">
+      <section id="spells" class="spells"></section>
+      <section class="controls">
+        <label>Engine time
+          <select id="millis">
+            <option value="1000">1s</option>
+            <option value="3000" selected>3s</option>
+            <option value="10000">10s</option>
+          </select>
+        </label>
+        <button id="new-game" type="button">New game</button>
+        <button id="undo" type="button">Undo</button>
+        <button id="cancel-spell" type="button" hidden>Cancel spell</button>
+      </section>
+      <section id="analysis" class="analysis"></section>
+      <section><ol id="moves" class="moves"></ol></section>
+    </aside>
+  </div>
+</main>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
