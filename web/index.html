@@ -3,38 +3,141 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Spell Chess</title>
+<title>Spell Chess — chess, plus two spells</title>
+<meta name="description" content="Play Spell Chess against a real engine. Freeze a 3×3 block, make a square see-through, and capture the king outright.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Caprasimo&family=Figtree:wght@400;600;800&family=Noto+Sans+Symbols+2&display=swap">
 <link rel="stylesheet" href="./style.css">
 </head>
 <body>
-<main>
-  <h1>Spell Chess</h1>
-  <p id="error" class="error" hidden></p>
-  <div class="layout">
-    <div>
-      <div id="board" class="board"></div>
-      <p id="status" class="status">Loading engine…</p>
+<div class="page">
+
+  <nav class="nav">
+    <span class="nav-brand">Spell Chess</span>
+    <span class="nav-spacer"></span>
+    <a class="btn btn-ghost" href="#primer">How it works</a>
+    <a class="btn btn-secondary" href="#play">Play</a>
+  </nav>
+
+  <section id="primer" class="hero">
+    <h1>Chess, plus two spells.</h1>
+    <p class="hero-body">Every turn you may cast one spell before you move. Spells are limited,
+    they recharge after three turns, and they break the rules you thought you knew — including
+    the one that says the king can't be taken.</p>
+  </section>
+
+  <!-- The three tactic cards. Each diagram is built by primer.js: a 6×6 board whose
+       pieces and fields are absolutely positioned boxes moved with `transform`, so a
+       four-step loop of plain style changes reads as animation. -->
+  <section class="cards" id="cards">
+    <article class="card elev-sm" data-card="freeze">
+      <div class="diagram" data-diagram></div>
+      <div class="diagram-caption" data-caption></div>
+      <h2 class="card-title">Freeze</h2>
+      <p class="card-body">Five per game. Locks a 3×3 area for a turn — nothing inside can move,
+      and frozen pieces stop giving check entirely. It catches your own pieces too.</p>
+    </article>
+    <article class="card elev-sm" data-card="jump">
+      <div class="diagram" data-diagram></div>
+      <div class="diagram-caption" data-caption></div>
+      <h2 class="card-title">Jump</h2>
+      <p class="card-body">Two per game. Makes one occupied square see-through for a turn, so
+      rooks, bishops and queens slide straight past the piece standing there — for both players.</p>
+    </article>
+    <article class="card elev-sm" data-card="king">
+      <div class="diagram" data-diagram></div>
+      <div class="diagram-caption" data-caption></div>
+      <h2 class="card-title">King capture</h2>
+      <p class="card-body">A spell can open an attack your opponent never had a chance to answer —
+      so the king can simply be captured, and that wins the game on the spot.</p>
+    </article>
+  </section>
+
+  <section id="play" class="stage">
+    <p id="error" class="error" role="alert" hidden></p>
+    <div class="stage-row">
+
+      <div class="stage-main">
+        <div class="statusbar">
+          <span id="status" class="status" aria-live="polite">Loading engine…</span>
+          <span class="nav-spacer"></span>
+          <span id="hint" class="hint"></span>
+        </div>
+
+        <div class="board-wrap">
+          <div id="board" class="board" role="grid" aria-label="Spell Chess board"></div>
+          <div id="burst" class="burst" aria-hidden="true" hidden></div>
+        </div>
+
+        <div class="dock">
+          <!-- Grouped so the two spells wrap as a pair, never one beside an action. -->
+          <div class="dock-spells">
+            <button id="cast-freeze" class="btn spell-btn" type="button" data-kind="freeze" aria-pressed="false">
+              <span class="spell-name">Freeze</span>
+              <span class="spell-sub" data-sub>5 left</span>
+              <span class="pips" data-pips aria-hidden="true"></span>
+            </button>
+            <button id="cast-jump" class="btn spell-btn" type="button" data-kind="jump" aria-pressed="false">
+              <span class="spell-name">Jump</span>
+              <span class="spell-sub" data-sub>2 left</span>
+              <span class="pips" data-pips aria-hidden="true"></span>
+            </button>
+          </div>
+          <div class="dock-actions">
+            <button id="new-game" class="btn btn-primary" type="button">New game</button>
+            <div class="dock-row">
+              <button id="undo" class="btn btn-ghost undo-btn" type="button">Undo</button>
+              <button id="cancel-spell" class="btn btn-ghost cancel-btn" type="button" hidden>Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="rail">
+        <div class="panel">
+          <h2 class="panel-title">This turn</h2>
+          <p id="coach" class="panel-body" aria-live="polite">Tap one of your pieces to see where
+          it can go. Cast a spell first if you want to change what's possible.</p>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2 class="panel-title">Moves</h2>
+            <span id="move-count" class="panel-count">0 played</span>
+          </div>
+          <ol id="moves" class="moves"></ol>
+          <p id="moves-empty" class="panel-empty">Nothing played yet.</p>
+        </div>
+        <!-- Not in the handoff: the engine controls the redesign would otherwise
+             drop. Same panel treatment, kept last so the coaching leads. -->
+        <div class="panel">
+          <div class="panel-head">
+            <h2 class="panel-title">Engine</h2>
+            <span id="analysis-depth" class="panel-count"></span>
+          </div>
+          <label class="panel-field" for="millis">Thinking time
+            <select id="millis" class="select">
+              <option value="1000">1 second</option>
+              <option value="3000" selected>3 seconds</option>
+              <option value="10000">10 seconds</option>
+            </select>
+          </label>
+          <table id="analysis" class="analysis"></table>
+          <button id="analyze" class="btn btn-ghost analyze-btn" type="button">Analyse this position</button>
+        </div>
+      </div>
     </div>
-    <aside class="side">
-      <section id="spells" class="spells"></section>
-      <section class="controls">
-        <label>Engine time
-          <select id="millis">
-            <option value="1000">1s</option>
-            <option value="3000" selected>3s</option>
-            <option value="10000">10s</option>
-          </select>
-        </label>
-        <button id="new-game" type="button">New game</button>
-        <button id="undo" type="button">Undo</button>
-        <button id="analyze" type="button">Analyze</button>
-        <button id="cancel-spell" type="button" hidden>Cancel spell</button>
-      </section>
-      <section id="analysis" class="analysis"></section>
-      <section><ol id="moves" class="moves"></ol></section>
-    </aside>
-  </div>
-</main>
+  </section>
+
+  <p class="closing">The rules here are the same ones
+  <a href="https://www.chess.com/variants/spell-chess">Spell Chess on chess.com</a> uses — but
+  chess.com only lets you play other people: no engine, no analysis. That's the gap this fills.
+  Every move, spell and search runs in your browser against this repo's WebAssembly engine: the
+  dock's cast buttons stage a spell exactly as <code>turns</code> reports it, and the committed
+  move goes through <code>apply</code>. Rules corpus and engine:
+  <a href="https://github.com/AlexCMarty/spell-chess-bot/">spell-chess-bot</a>.</p>
+</div>
+
 <script type="module" src="./app.js"></script>
 </body>
 </html>
