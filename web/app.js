@@ -233,6 +233,8 @@ async function refresh() {
 }
 
 async function playTurn(from, to) {
+  if (thinking) return;
+  thinking = true;
   const promo = promoFor(from, to);
   const chosen = turnsForStaged().find(
     (t) => t.from === from && t.to === to && t.promo === promo,
@@ -247,6 +249,9 @@ async function playTurn(from, to) {
     if (state.status.kind === "inProgress") await engineMove();
   } catch (err) {
     showError(`Could not play that turn: ${err.message}`);
+    await refresh();
+  } finally {
+    thinking = false;
     await refresh();
   }
 }
@@ -268,9 +273,6 @@ async function engineMove() {
     }
   } catch (err) {
     showError(`Engine error: ${err.message}`);
-  } finally {
-    thinking = false;
-    await refresh();
   }
 }
 
