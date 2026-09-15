@@ -7,6 +7,22 @@ chess.com's chess variant with castable spells.
 `https://www.chess.com/variants/spell-chess/analysis`.** Other pages can match an automated
 client into a live game against a human, which would be a terms-of-service violation.
 
+## Play in the browser
+
+The engine is compiled to WebAssembly and published at
+**<https://alexcmarty.github.io/spell-chess-bot/>** — it runs entirely client-side,
+with no server component. `.github/workflows/pages.yml` rebuilds and redeploys it on
+every push to `main`.
+
+To run the site locally:
+
+```bash
+wasm-pack build crates/wasm --target web --out-dir ../../web/pkg --release
+python3 -m http.server -d web 8099
+```
+
+Then open <http://localhost:8099/>. `web/pkg/` is generated and gitignored.
+
 ## What's here
 
 A Rust workspace with a rules-accurate move generator, a parallel alpha-beta search, and a

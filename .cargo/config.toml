@@ -1,2 +1,6 @@
-[build]
+# Scoped to non-wasm targets deliberately. Under `[build]` these flags also
+# reach wasm32, where `target-cpu` perturbs reference-types feature detection
+# and makes wasm-bindgen fail with "failed to find the
+# `__wbindgen_externref_table_dealloc` function".
+[target.'cfg(not(target_arch = "wasm32"))']
 rustflags = ["-C", "target-cpu=native"]

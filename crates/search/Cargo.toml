@@ -8,3 +8,10 @@ spellchess-core = { path = "../core" }
 
 [dev-dependencies]
 spellchess-cli = { path = "../cli" }
+
+# Only on wasm: `std::time::Instant::now()` panics on wasm32-unknown-unknown, and
+# `search_smp` calls it unconditionally. `web-time` backs `Instant` with the
+# browser's Performance API and re-exports `std::time` verbatim everywhere else,
+# so native builds keep their zero non-dev dependencies.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"

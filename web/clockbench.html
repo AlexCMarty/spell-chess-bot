@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>deadline-check overhead</title>
+<pre id="out">measuring…</pre>
+<script type="module">
+  import init, { bench_clock } from "./pkg/spellchess_wasm.js";
+  await init();
+  bench_clock(200000); // warm up: first calls pay JIT tiering
+  const ns = bench_clock(2000000);
+  // Reference tree size for a depth-6 search from the starting position.
+  // Replace with the real counts from the bench harness below.
+  const nodes = 340000, qnodes = 2380000;
+  const out = {
+    ns_per_clock_read: Number(ns.toFixed(1)),
+    reads_per_search: nodes + qnodes,
+    seconds_of_overhead: Number((ns * (nodes + qnodes) / 1e9).toFixed(3)),
+    percent_of_3s_budget: Number((ns * (nodes + qnodes) / 3e7).toFixed(1)),
+  };
+  document.getElementById("out").textContent = JSON.stringify(out, null, 2);
+  console.log("clockbench:", JSON.stringify(out));
+</script>

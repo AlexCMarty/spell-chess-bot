@@ -1,0 +1,72 @@
+name: Deploy site to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Newest run in a group wins. Group by workflow + PR number or ref so a PR
+# wasm type-check cannot cancel an in-flight main Pages deploy (and vice versa).
+# cancel-in-progress stays true: that value is plan-mandated.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add the wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: wasm-${{ hashFiles('Cargo.lock') }}
+          restore-keys: wasm-
+
+      - name: Install wasm-pack
+        # The prebuilt binary; `cargo install` would compile it from source on
+        # every uncached run.
+        run: |
+          curl -sSL https://github.com/wasm-bindgen/wasm-pack/releases/download/v0.15.0/wasm-pack-v0.15.0-x86_64-unknown-linux-musl.tar.gz \
+            | tar xz --strip-components=1 -C /usr/local/bin --wildcards '*/wasm-pack'
+          wasm-pack --version
+
+      # Type-checks the `#[cfg(target_arch = "wasm32")]` half of `lib.rs`, which a
+      # native `cargo test` never touches. Runs for pull requests too, so a PR that
+      # breaks the wasm build no longer merges green.
+      - name: Build the engine to wasm
+        run: wasm-pack build crates/wasm --target web --out-dir ../../web/pkg --release
+
+      # Pages-only steps below: only needed on the main-branch deploy path, not on
+      # a PR's type-check run.
+      - if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/configure-pages@v5
+      - if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

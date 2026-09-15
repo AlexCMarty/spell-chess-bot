@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use crate::clock::{Duration, Instant};
 use spellchess_core::{apply_turn, generate_quiescence_recapture_turns, generate_quiescence_turns_from, generate_search_spell_turns, generate_search_turns, legal_moves, Color, PieceKind, Position, Turn};
 use crate::eval::{evaluate, piece_value};
 use crate::tables::{HistoryTable, KillerTable};
@@ -567,6 +567,7 @@ fn iterate(
     start_depth: u32,
     aspiration: bool,
     state: &mut SearchState<'_>,
+    on_iteration: &mut dyn FnMut(u32, i32, &Turn),
 ) -> Option<(Turn, i32)> {
     let mut best: Option<(Turn, i32)> = None;
     let mut last_score: Option<i32> = None;
@@ -621,6 +622,7 @@ fn iterate(
                             best_move: Some(turn),
                         });
                         best = Some((turn, score));
+                        on_iteration(depth, score, &turn);
                     }
                     break;
                 }
@@ -676,7 +678,12 @@ pub fn search(pos: &Position, budget: Budget) -> Option<(Turn, i32)> {
 /// The result is also not reproducible above 1 thread: which helper wins a race to a
 /// table slot decides which of several turns comes back. `threads == 1` is exactly the
 /// single-threaded path and stays deterministic.
-pub fn search_smp(pos: &Position, budget: Budget, threads: usize) -> Option<(Turn, i32)> {
+pub fn search_with_progress(
+    pos: &Position,
+    budget: Budget,
+    threads: usize,
+    on_iteration: &mut dyn FnMut(u32, i32, &Turn),
+) -> Option<(Turn, i32)> {
     let start = Instant::now();
     let threads = threads.max(1);
     let deadline = match budget {
@@ -716,7 +723,7 @@ pub fn search_smp(pos: &Position, budget: Budget, threads: usize) -> Option<(Tur
                     // the main thread's current iteration move for move. Capped at
                     // `max_depth` so a shallow search still gives them something to do.
                     let offset = (i as u32 % 3).min(max_depth.saturating_sub(1));
-                    iterate(pos, max_depth, 1 + offset, false, &mut state);
+                    iterate(pos, max_depth, 1 + offset, false, &mut state, &mut |_, _, _| {});
                     (state.nodes, state.qnodes, state.spell_gens, state.tt_hits, state.nmp_cutoffs, state.no_spell_cutoffs)
                 })
             })
@@ -738,7 +745,7 @@ pub fn search_smp(pos: &Position, budget: Budget, threads: usize) -> Option<(Tur
             nmp_cutoffs: 0,
             no_spell_cutoffs: 0,
         };
-        best = iterate(pos, max_depth, 1, true, &mut state);
+        best = iterate(pos, max_depth, 1, true, &mut state, on_iteration);
         // The main thread has its answer; tell the helpers to unwind rather than
         // finish iterations nobody will read.
         stop.store(true, Ordering::Relaxed);
@@ -767,6 +774,13 @@ pub fn search_smp(pos: &Position, budget: Budget, threads: usize) -> Option<(Tur
         }
     }
     best
+}
+
+/// `search_with_progress` with nothing listening. Every existing caller wants
+/// this; only the browser front end, which renders a live analysis panel, needs
+/// the per-iteration reports.
+pub fn search_smp(pos: &Position, budget: Budget, threads: usize) -> Option<(Turn, i32)> {
+    search_with_progress(pos, budget, threads, &mut |_, _, _| {})
 }
 
 #[cfg(test)]
@@ -1189,5 +1203,41 @@ mod tests {
     fn a_non_mate_score_is_unaffected_by_tt_ply_adjustment() {
         assert_eq!(tt_store_score(120, 4), 120);
         assert_eq!(tt_probe_score(120, 7), 120);
+    }
+
+    /// The analysis panel is driven entirely by this callback, so it must fire once
+    /// per completed iteration with strictly increasing depths, and the last thing
+    /// it reports must be the answer the search actually returns. A callback that
+    /// lagged the return value by an iteration would render a stale best move.
+    #[test]
+    fn progress_callback_reports_each_depth_and_ends_on_the_final_answer() {
+        let pos = Position::starting();
+        let mut seen: Vec<(u32, i32, Turn)> = Vec::new();
+        let got = search_with_progress(&pos, Budget::Depth(4), 1, &mut |depth, score, turn| {
+            seen.push((depth, score, *turn));
+        });
+
+        assert!(!seen.is_empty(), "callback never fired");
+        let depths: Vec<u32> = seen.iter().map(|(d, _, _)| *d).collect();
+        assert!(
+            depths.windows(2).all(|w| w[1] > w[0]),
+            "depths must strictly increase, got {depths:?}"
+        );
+        assert_eq!(*depths.last().unwrap(), 4, "last iteration should be the full depth");
+
+        let (turn, score) = got.expect("search must find a turn from the starting position");
+        let (_, last_score, last_turn) = seen.last().unwrap();
+        assert_eq!(*last_turn, turn, "final callback turn must match the returned turn");
+        assert_eq!(*last_score, score, "final callback score must match the returned score");
+    }
+
+    /// `search_smp` must be exactly `search_with_progress` with a no-op callback.
+    /// If the two ever diverge, the CLI and the browser are running different engines.
+    #[test]
+    fn search_smp_matches_search_with_progress() {
+        let pos = Position::starting();
+        let a = search_smp(&pos, Budget::Depth(4), 1);
+        let b = search_with_progress(&pos, Budget::Depth(4), 1, &mut |_, _, _| {});
+        assert_eq!(a, b, "single-threaded search must be deterministic and identical");
     }
 }
