@@ -6,9 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Only the newest deploy matters; cancel superseded ones rather than queueing.
+# Newest run in a group wins. Group by workflow + PR number or ref so a PR
+# wasm type-check cannot cancel an in-flight main Pages deploy (and vice versa).
+# cancel-in-progress stays true: that value is plan-mandated.
 concurrency:
-  group: pages
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -51,15 +53,15 @@ jobs:
 
       # Pages-only steps below: only needed on the main-branch deploy path, not on
       # a PR's type-check run.
-      - if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/configure-pages@v5
-      - if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
           path: web
 
   deploy:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     environment:
