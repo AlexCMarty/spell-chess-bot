@@ -69,6 +69,42 @@ let staged = null;        // {kind, at} spell staged for this turn, or null
 let thinking = false;     // blocks input while the engine searches
 let armed = null;         // spell kind whose targets are being shown, or null
 
+// Depth, evaluation and best turn, updated per completed iteration. No principal
+// variation: the engine tracks a best move, not a line, and reconstructing one
+// means walking the transposition table.
+let analysis = [];
+
+/// Scores come back from the side to move's point of view. The panel reports
+/// from White's, which is the convention every chess UI uses, so a reader is not
+/// re-orienting the sign every ply.
+function evalText(score, sideToMove) {
+  const white = sideToMove === "white" ? score : -score;
+  if (Math.abs(white) >= 99000) {
+    const plies = 100000 - Math.abs(white);
+    return `${white > 0 ? "+" : "-"}M${Math.ceil(plies / 2)}`;
+  }
+  return `${white >= 0 ? "+" : ""}${(white / 100).toFixed(2)}`;
+}
+
+function renderAnalysis() {
+  const el = document.getElementById("analysis");
+  el.replaceChildren();
+  const heading = document.createElement("strong");
+  heading.textContent = thinking ? "Thinking…" : "Analysis";
+  el.append(heading);
+  const table = document.createElement("table");
+  for (const line of analysis.slice().reverse()) {
+    const tr = document.createElement("tr");
+    for (const cell of [`d${line.depth}`, line.eval, line.text]) {
+      const td = document.createElement("td");
+      td.textContent = cell;
+      tr.append(td);
+    }
+    table.append(tr);
+  }
+  el.append(table);
+}
+
 function sameSpell(a, b) {
   if (a === null && b === null) return true;
   if (a === null || b === null) return false;
@@ -175,6 +211,7 @@ function render() {
   renderStatus();
   renderSpells();
   renderMoves();
+  renderAnalysis();
 }
 
 function onSquareClick(name) {
@@ -258,6 +295,7 @@ async function playTurn(from, to) {
 
 async function engineMove() {
   thinking = true;
+  analysis = [];
   render();
   try {
     const millis = Number(document.getElementById("millis").value);
@@ -301,6 +339,33 @@ document.getElementById("undo").addEventListener("click", async () => {
 document.getElementById("cancel-spell").addEventListener("click", () => {
   staged = null; armed = null; selected = null;
   render();
+});
+
+onProgress = (msg) => {
+  analysis.push({
+    depth: msg.depth,
+    eval: evalText(msg.score, state.sideToMove),
+    text: msg.turn.text,
+  });
+  renderAnalysis();
+};
+
+// Analysing runs the same search on the user's own position without applying
+// the result, so the panel works when it is your move.
+document.getElementById("analyze").addEventListener("click", async () => {
+  if (thinking) return;
+  thinking = true;
+  analysis = [];
+  render();
+  try {
+    const millis = Number(document.getElementById("millis").value);
+    await call("search", { millis });
+  } catch (err) {
+    showError(`Analysis failed: ${err.message}`);
+  } finally {
+    thinking = false;
+    render();
+  }
 });
 
 async function boot() {
