@@ -37,6 +37,10 @@ function showError(text) {
   el.hidden = false;
 }
 
+function clearError() {
+  document.getElementById("error").hidden = true;
+}
+
 const GLYPHS = {
   wK: "♔", wQ: "♕", wR: "♖", wB: "♗", wN: "♘", wP: "♙",
   bK: "♚", bQ: "♛", bR: "♜", bB: "♝", bN: "♞", bP: "♟",
@@ -193,6 +197,7 @@ function renderSpells() {
         btn.textContent = armed === kind ? "Pick target…" : `Cast ${kind}`;
         btn.disabled = thinking || staged !== null || spellTargets(kind).size === 0;
         btn.addEventListener("click", () => {
+          if (thinking) return;
           armed = armed === kind ? null : kind;
           selected = null;
           render();
@@ -230,7 +235,7 @@ function onSquareClick(name) {
   }
 
   if (selected && destinationsFrom(selected).includes(name)) {
-    playTurn(selected, name);
+    playTurn(selected, name).catch((err) => showError(`Could not play that turn: ${err.message}`));
     return;
   }
 
@@ -272,6 +277,7 @@ async function refresh() {
 async function playTurn(from, to) {
   if (thinking) return;
   thinking = true;
+  render(); // disables input and shows "Thinking…" before the first await below
   const promo = promoFor(from, to);
   const chosen = turnsForStaged().find(
     (t) => t.from === from && t.to === to && t.promo === promo,
@@ -282,17 +288,21 @@ async function playTurn(from, to) {
   try {
     state = await call("apply", { from, to, promo, spell: castThisTurn });
     moveLog.push(chosen ? chosen.text : `${from}${to}`);
-    await refresh();
+    // render(), not refresh(): legalTurns is unused while thinking, and the
+    // engine's round trip is about to start. finally re-fetches it below.
+    render();
     if (state.status.kind === "inProgress") await engineMove();
   } catch (err) {
     showError(`Could not play that turn: ${err.message}`);
-    await refresh();
   } finally {
     thinking = false;
     await refresh();
   }
 }
 
+// No `finally` here: the caller (`playTurn`) owns clearing `thinking` and
+// refreshing, since it must do that even when it never calls `engineMove` at
+// all (e.g. the human's own turn ended the game).
 async function engineMove() {
   thinking = true;
   analysis = [];
@@ -316,10 +326,16 @@ async function engineMove() {
 
 document.getElementById("new-game").addEventListener("click", async () => {
   if (thinking) return;
-  state = await call("reset");
-  moveLog.length = 0;
-  selected = null; staged = null; armed = null;
-  await refresh();
+  try {
+    state = await call("reset");
+    moveLog.length = 0;
+    analysis = [];
+    selected = null; staged = null; armed = null;
+    clearError();
+    await refresh();
+  } catch (err) {
+    showError(`Could not start a new game: ${err.message}`);
+  }
 });
 
 // One undo steps back a single turn -- the engine's reply. A second steps back
@@ -327,13 +343,19 @@ document.getElementById("new-game").addEventListener("click", async () => {
 // undoes twice when there is a full pair to remove.
 document.getElementById("undo").addEventListener("click", async () => {
   if (thinking) return;
-  for (let i = 0; i < 2; i++) {
-    if (!(await call("undo"))) break;
-    moveLog.pop();
+  try {
+    for (let i = 0; i < 2; i++) {
+      if (!(await call("undo"))) break;
+      moveLog.pop();
+    }
+    state = await call("state");
+    analysis = [];
+    selected = null; staged = null; armed = null;
+    clearError();
+    await refresh();
+  } catch (err) {
+    showError(`Could not undo: ${err.message}`);
   }
-  state = await call("state");
-  selected = null; staged = null; armed = null;
-  await refresh();
 });
 
 document.getElementById("cancel-spell").addEventListener("click", () => {
