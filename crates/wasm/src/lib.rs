@@ -125,6 +125,9 @@ mod bindings {
         pub fn search(&self, millis: u32, on_progress: &js_sys::Function) -> String {
             let budget = Budget::Time(Duration::from_millis(millis as u64));
             let mut report = |depth: u32, score: i32, turn: &spellchess_core::Turn| {
+                // Deliberately swallowed: `on_progress` only repaints a cosmetic
+                // analysis panel, and an error there (or the callback throwing)
+                // must never unwind the search itself.
                 let _ = on_progress.call3(
                     &JsValue::NULL,
                     &JsValue::from(depth),
