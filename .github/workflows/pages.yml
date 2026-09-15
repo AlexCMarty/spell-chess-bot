@@ -3,6 +3,7 @@ name: Deploy site to GitHub Pages
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 # Only the newest deploy matters; cancel superseded ones rather than queueing.
@@ -42,15 +43,23 @@ jobs:
             | tar xz --strip-components=1 -C /usr/local/bin --wildcards '*/wasm-pack'
           wasm-pack --version
 
+      # Type-checks the `#[cfg(target_arch = "wasm32")]` half of `lib.rs`, which a
+      # native `cargo test` never touches. Runs for pull requests too, so a PR that
+      # breaks the wasm build no longer merges green.
       - name: Build the engine to wasm
         run: wasm-pack build crates/wasm --target web --out-dir ../../web/pkg --release
 
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      # Pages-only steps below: only needed on the main-branch deploy path, not on
+      # a PR's type-check run.
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/configure-pages@v5
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
         with:
           path: web
 
   deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     environment:
