@@ -321,4 +321,91 @@ mod tests {
         let plain = find_turn(&pos, from, to, None, None).unwrap();
         assert_eq!(plain.spell, None);
     }
+
+    /// Mirrors `terminal::tests::freeze_mate_position` with spells exhausted so the
+    /// escape hatch cannot fire -- Black to move, no legal turn, king attacked.
+    /// `state_json`/`status_json` must report the checkmate kind and the winner.
+    #[test]
+    fn status_json_reports_checkmate_and_winner() {
+        use spellchess_core::{Board, CastleRights, Piece, SpellCounter, SpellField, SpellState};
+
+        let mut pos = Position { board: Board::empty(), castle_rights: CastleRights::all(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("h8").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("a7").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Pawn }));
+        pos.black_spells = SpellState { freeze: SpellCounter { count: 0, lock: 0 }, jump: SpellCounter { count: 0, lock: 0 } };
+        pos.fields.push(SpellField {
+            square: Square::from_str("e8").unwrap(), owner: Color::White,
+            kind: SpellKind::Freeze, expires_after_ply: pos.ply + 1,
+        });
+        pos.side_to_move = Color::Black;
+
+        assert_eq!(
+            game_status(&pos),
+            GameStatus::Checkmate(Color::White),
+            "fixture must actually be checkmate, or the status_json assertion below is meaningless"
+        );
+        let out = state_json(&pos);
+        assert!(out.contains(r#""status":{"kind":"checkmate","winner":"white"}"#), "got {out}");
+    }
+
+    /// Mirrors `terminal::tests::vector_14_stalemate_is_spell_aware`: Black to move,
+    /// no legal turn, king not attacked.
+    #[test]
+    fn status_json_reports_stalemate() {
+        use spellchess_core::{Board, CastleRights, Piece, SpellCounter, SpellField, SpellState};
+
+        let mut pos = Position { board: Board::empty(), castle_rights: CastleRights::all(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("b1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.black_spells = SpellState { freeze: SpellCounter { count: 0, lock: 0 }, jump: SpellCounter { count: 0, lock: 0 } };
+        pos.fields.push(SpellField {
+            square: Square::from_str("e8").unwrap(), owner: Color::White,
+            kind: SpellKind::Freeze, expires_after_ply: pos.ply + 1,
+        });
+        pos.side_to_move = Color::Black;
+
+        assert_eq!(
+            game_status(&pos),
+            GameStatus::Stalemate,
+            "fixture must actually be stalemate, or the status_json assertion below is meaningless"
+        );
+        let out = state_json(&pos);
+        assert!(out.contains(r#""status":{"kind":"stalemate"}"#), "got {out}");
+    }
+
+    /// Mirrors `legal::tests::vector_9_king_capture_via_jump`: a live jump field
+    /// makes the black bishop's slide to e1 transparent, so it can capture the
+    /// white king outright. The resulting position has no white king at all.
+    #[test]
+    fn status_json_reports_king_captured_and_winner() {
+        use spellchess_core::{Board, Piece, PieceMove, SpellField};
+
+        let mut pos = Position { board: Board::empty(), ..Position::starting() };
+        pos.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("d2").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Bishop }));
+        pos.board.set(Square::from_str("a1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("h2").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
+        pos.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        pos.board.set(Square::from_str("b4").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Bishop }));
+        pos.board.set(Square::from_str("a8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
+        pos.side_to_move = Color::Black;
+        pos.fields.push(SpellField {
+            square: Square::from_str("d2").unwrap(), owner: Color::Black,
+            kind: SpellKind::Jump, expires_after_ply: pos.ply + 1,
+        });
+
+        let capture = PieceMove::quiet(Square::from_str("b4").unwrap(), Square::from_str("e1").unwrap());
+        let turn = Turn { spell: None, mv: capture };
+        assert!(generate_turns(&pos).contains(&turn), "the capture must be a legal turn, or the fixture is wrong");
+        let after = apply_turn(&pos, &turn);
+
+        assert_eq!(game_status(&after), GameStatus::KingCaptured(Color::Black));
+        let out = state_json(&after);
+        assert!(out.contains(r#""status":{"kind":"kingCaptured","winner":"black"}"#), "got {out}");
+    }
 }
