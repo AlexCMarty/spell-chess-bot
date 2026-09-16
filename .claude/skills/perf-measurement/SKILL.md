@@ -14,8 +14,13 @@ this project's history failed one of those, not the algorithmics.
 A perf change may not change what the search explores. Before and after, at both depths:
 
 ```sh
-SPELLCHESS_PROFILE=1 cargo run --release -p spellchess-cli   # nodes/qnodes/spell_gens/nps
+SPELLCHESS_PROFILE=1 cargo run --release -p spellchess-search --example bench -- 6 2>&1 | tail -3
 ```
+
+That prints one `profile search:` line with `nodes=`, `qnodes=`, `spell_gens=`,
+`tt_hits=`, `nmp=`, `no_spell_cut=` and `nps=`. Run it against the `bench` example, **not**
+against `-p spellchess-cli`: the CLI is an interactive REPL that runs no search until a
+`go` line arrives, so on EOF it prints its banner and exits with no counters at all.
 
 If node/qnode counts move, you changed the tree, not the cost per node — that is a
 different kind of change and needs correctness review, not a benchmark. This gate is
@@ -32,7 +37,7 @@ traded back for speed.
 | `bench` | **What does the search actually cost?** The number that counts. | `cargo run --release -p spellchess-search --example bench -- 6` |
 | `hotcost` | What does one call to a hot function cost? | `cargo run --release -p spellchess-search --example hotcost` |
 | `qprof` | Where does that cost go, inside a node? | `--features spellchess-core/qprofile`, then `examples/qprof.rs` |
-| `SPELLCHESS_PROFILE=1` | How many nodes/qnodes/spell_gens? | env var on the CLI |
+| `SPELLCHESS_PROFILE=1` | How many nodes/qnodes/spell_gens? | env var on the `bench` example (**not** the CLI — see above) |
 | `--ignored` release suite | Did I regress past a known bound? (~156s) | `cargo test -p spellchess-search --release -- --ignored` |
 
 `hotcost` says what a call costs; `qprof` says where that cost goes. **They have

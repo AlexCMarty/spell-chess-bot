@@ -37,8 +37,10 @@ Two files are more than half the hard code:
   rescanning it. This is the optimization the whole engine is built around, and it is
   where every legality bug in this project's history has lived.
 - **`core/src/legal.rs`** (~1,410 lines) — full legality: `legal_moves`, `legal_captures`,
-  and the six turn generators below. `NodeContext` here precomputes the per-node state
-  (frozen set, jump fields, slider occupancy, checkers, pins) that the delta path reads.
+  and the six turn generators below. It builds a `NodeContext` — defined in
+  `spell_delta.rs`, constructed here, once per node — which precomputes the per-node
+  state (frozen set, jump fields, slider occupancy, checkers, pins) that the delta path
+  reads.
 
 Everything else is comparatively mechanical: `bitboard.rs`, `board.rs`, `types.rs`,
 `rays.rs`, `attacks.rs`, `movegen.rs` (pseudo-legal generation), `fields.rs` (live spell
@@ -52,10 +54,15 @@ differ along two axes: how complete the spell coverage is, and how expensive.
 | Generator | Used by | Spell coverage |
 |---|---|---|
 | `generate_turns` | CLI, `terminal.rs` | **Exhaustive.** All spell targets, full rescan. The reference oracle. |
-| `generate_search_turns` | search, root | Relevance-filtered targets, paired with the full baseline |
+| `generate_search_turns` | `best_turn`, the depth-0 terminal check, and the out-of-time root fallback — **not** the main node expansion | Relevance-filtered targets, paired with the full baseline |
 | `generate_search_spell_turns` | search | Spell-paired turns only, no no-spell copies — so a beta cutoff can skip the expensive pairing |
 | `generate_quiescence_turns` / `_turns_from` | quiescence **entry** | Captures, including jump- and freeze-enabled *new* captures. Expensive: a scan per relevant target. |
 | `generate_quiescence_recapture_turns` | quiescence **recursion** | Captures plus "freeze the recapturer" only. Cheap, pure bitboard. |
+
+A node in `alphabeta` does not call any single generator from this table: it builds its
+baseline with `legal_moves` + `no_spell_turns`, then adds either
+`generate_search_spell_turns` or a capture-filtered `spell_capture_turns`, chosen by the
+`full_spells` switch in `search.rs`.
 
 The entry/recursion split exists because using the expensive generator at every recursive
 quiescence node once made a depth-6 search 40x slower. The expensive cases are covered
@@ -86,9 +93,18 @@ prove; return `NeedsRescan`.
   bit-identical. If they move, you changed the search tree, which is a correctness change
   needing review — not a benchmark. Speed work must not narrow the tree; that is settled
   policy.
-- **Emission order is part of the generator contract**, not just the set. Consumers read
-  turns unsorted, so a different order changes beta-cutoff order and qnode counts.
-  `pseudo_legal_moves` emits ascending by `(from, to)`; replacements must match.
+- **Emission order is part of the generator contract**, not just the set. Quiescence
+  iterates its list unsorted, and `order_turns` sorts with `sort_unstable_by_key`, so
+  emission order also breaks ties among equal-priority turns. Either way a different
+  order changes beta-cutoff order and qnode counts.
+  `pseudo_legal_moves` emits **castling first**, then each own non-frozen square in
+  ascending square index, and within a square in fixed per-`PieceKind` order (pawn:
+  single push, double push, then captures). It is **not** sorted by `(from, to)` —
+  castling is emitted from `e1` before the `a1` rook's moves, and a pawn emits its
+  double push before its captures. `pseudo_legal_captures` mirrors that relative order
+  exactly; the property test
+  `pseudo_legal_captures_matches_pseudo_legal_moves_filtered_ordered` in `movegen.rs`
+  pins it. A replacement must reproduce this order, not a sorted one.
 - **Never take a transposition-table cutoff at ply 0**, and record the root's best move as
   it is found rather than reading it back out of the TT afterwards. Both were real bugs.
 - **Quiescence never probes the TT.** ~87% of nodes are quiescence nodes, which is why

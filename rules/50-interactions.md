@@ -41,7 +41,10 @@ executed rather than answered.
 
 `[VERIFIED]` **A move that captures the enemy king is legal even if the mover's own king is
 simultaneously in check from an unrelated piece, and even if that move does nothing to
-address the check** — as long as it leaves at most one attacker on the mover's own king.
+address the check** — as long as it does not leave *more* attackers on the mover's own
+king than it already faced, or than one; formally `after <= max(before, 1)`. A
+pre-existing **double** check does not make the king capture illegal — see the
+measurements below and [`10-base-chess.md`](10-base-chess.md).
 Measured: White king `a1` in check from Black rook `a8` (clear file); White queen `h8`
 still listed `h1` — Black's king, unrelated to the check — among its legal destinations,
 alongside the expected check-resolving `a8`. This means the "why this is usually reachable"

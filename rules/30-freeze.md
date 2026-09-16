@@ -21,8 +21,11 @@ answers:
 ## Targeting and geometry
 
 `[VERIFIED]` **Freeze may target any square of the 8×8 board** — occupied or empty, your
-piece or the opponent's, any square at all. The engine's target list for freeze at the
-start position is all 64 squares.
+piece or the opponent's — **subject to the two exclusions below**: a square already
+carrying a live freeze field, and any cast that would leave the mover with zero legal
+moves. The engine's target list for freeze at the start position is all 64 squares,
+because neither exclusion applies there. Do not lift "all 64" into a move generator as
+an unconditional rule.
 
 `[VERIFIED]` The effect is the **3×3 block of squares centred on the target, clipped to the
 board.** Squares outside the 8×8 board are simply not part of the zone.
@@ -171,15 +174,19 @@ field's life is 1 turn, it expires at the end of the opponent's turn. Measured: 
 knight moved into a white freeze zone; on Black's next turn the field was gone and the
 knight had its full set of moves.
 
-The clause only bites when it costs you the **remainder of the current turn** — i.e. it is
-really the same rule as [the zone affecting the caster](#the-zone-affects-the-caster-too) —
-or in non-canonical configurations with `fieldLife ≥ 2`.
+With the canonical `fieldLife = 1` this clause has **no observable effect at all**: a
+piece that enters a zone has already spent its move, and the field expires before it
+could move again. It only bites in non-canonical configurations with `fieldLife ≥ 2`.
+
+Do **not** conflate it with [the zone affecting the caster](#the-zone-affects-the-caster-too).
+That rule is strictly about a piece's **origin** square. Freezing by *destination* is not
+something the engine does, and a generator that implements it will reject legal moves.
 
 ## Interaction summary
 
 | Question | Answer |
 |---|---|
-| Can freeze target an empty square? | `[VERIFIED]` Yes — any of the 64 squares |
+| Can freeze target an empty square? | `[VERIFIED]` Yes — all 64 *minus* live freeze anchors and any cast that would leave you with no legal move |
 | Can freeze target the enemy king? | `[VERIFIED]` Yes |
 | Does it freeze my own pieces? | `[VERIFIED]` Yes, including during my own move |
 | Can a frozen piece be captured? | `[VERIFIED]` Yes, normally, and en passant |

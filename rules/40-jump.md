@@ -36,6 +36,16 @@ are not legal targets — this is the one place jump is more restrictive than fr
 king**. Measured target list on a test position: `[a1, a8, b4, d2, e1, e8, h2]` — every
 occupied square, both kings included, nothing else.
 
+`[VERIFIED]` **A jump target is also excluded if casting it would leave the mover with
+zero legal moves anywhere on the board.** This is the same spell-generic rule documented
+for freeze in [`30-freeze.md`](30-freeze.md#targeting-and-geometry), and it is easy to
+assume jump is exempt from it because jump only ever *adds* lines. It is not: making one
+of your **own** blockers transparent can expose your own king. With a knight on `c3`
+shielding `Ke1` from a bishop on `a5`, `jump@c3` opens that diagonal onto your own king
+and every move becomes illegal — so `c3` is not offered as a jump target at all. Like
+the freeze case this is checked *before* move generation; `spells::jump_targets` does not
+model it, which is why target lists must be derived from `generate_turns`.
+
 | | freeze | jump |
 |---|---|---|
 | Empty square | `[VERIFIED]` legal target | `[VERIFIED]` **illegal** target |
@@ -43,6 +53,7 @@ occupied square, both kings included, nothing else.
 | Enemy piece | `[VERIFIED]` legal | `[VERIFIED]` legal |
 | Either king | `[VERIFIED]` legal | `[VERIFIED]` legal |
 | Square already carrying a **live jump field** | `[VERIFIED]` legal (unaffected — freeze and jump exclusions are independent) | `[VERIFIED]` **illegal** — see below |
+| Cast that would leave the mover with **no legal move** | `[VERIFIED]` **illegal** target | `[VERIFIED]` **illegal** target |
 
 `[VERIFIED]` **A square that already has a live jump field on it is not a legal jump
 target, for either player.** Measured: White cast `jump@c5` (a knight there); on Black's
