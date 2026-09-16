@@ -1,0 +1,86 @@
+# The rule corpus in `rules/` is verified against one exact build of chess.com's client
+# engine. That bundle is live third-party code and can move without notice; when it does,
+# every `[VERIFIED]` tag silently becomes a claim about a build that no longer exists, and
+# `oracle_vectors.rs` keeps passing because it was generated from the old one.
+#
+# This job requests only the pinned *static asset*. It never opens a playable page, and it
+# never touches the analysis board -- `/r2/client-packages/` is the one chess.com path the
+# repo's own PreToolUse guard allows (`.claude/hooks/guard-chesscom-url.py`).
+name: Engine version check
+
+on:
+  schedule:
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request the pinned bundle
+        id: probe
+        run: |
+          # Keep this in sync with rules/INDEX.md's context header and Provenance section.
+          VERSION=2026.8.1
+          URL="https://www.chess.com/r2/client-packages/variants/${VERSION}/variants.js"
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 --retry 2 -I "$URL" || echo "000")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE"       >> "$GITHUB_OUTPUT"
+          echo "Pinned bundle $VERSION -> HTTP $CODE"
+
+      - name: Open an issue if the pin no longer resolves
+        # 000 means the request itself failed (network, DNS, timeout). That is not
+        # evidence the pin moved, so stay quiet rather than crying wolf every outage.
+        if: steps.probe.outputs.code != '200' && steps.probe.outputs.code != '000'
+        uses: actions/github-script@v7
+        env:
+          VERSION: ${{ steps.probe.outputs.version }}
+          CODE: ${{ steps.probe.outputs.code }}
+        with:
+          script: |
+            const { VERSION, CODE } = process.env;
+            const marker = '<!-- engine-version-check -->';
+            const title = `Engine bundle ${VERSION} no longer resolves (HTTP ${CODE})`;
+
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', per_page: 100,
+            });
+            if (existing.data.some(i => (i.body || '').includes(marker))) {
+              core.info('An open engine-version issue already exists; not filing another.');
+              return;
+            }
+
+            const body = [
+              marker,
+              `The pinned chess.com engine bundle returned **HTTP ${CODE}** instead of 200:`,
+              '',
+              '```',
+              `https://www.chess.com/r2/client-packages/variants/${VERSION}/variants.js`,
+              '```',
+              '',
+              'The version string has almost certainly moved. Until the corpus is re-verified,',
+              'every `[VERIFIED]` tag in `rules/` describes a build that is no longer served.',
+              '',
+              '**This does not fail any test.** `crates/core/tests/oracle_vectors.rs` was',
+              'generated from the old bundle, so it will keep passing and keep asserting the',
+              'old behaviour even if freeze or jump semantics have changed.',
+              '',
+              '### What to do',
+              '',
+              '1. Find the current version from the analysis page\'s network tab (that page, and',
+              '   only that page — see `rules/70-engine-api.md`).',
+              '2. Re-run the harness in `rules/70-engine-api.md` against the new bundle.',
+              '3. Diff the results against `rules/90-test-vectors.md`.',
+              '4. Update the pin in three places: `rules/INDEX.md` (context header and',
+              '   Provenance), `README.md`\'s `curl`, and the `VERSION` in this workflow.',
+              '5. Regenerate `crates/core/tests/fixtures/*.json` if any vector moved.',
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner, repo: context.repo.repo, title, body,
+            });

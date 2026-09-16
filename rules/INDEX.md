@@ -14,7 +14,12 @@ audience: AI coding agent building a Spell Chess bot
 > **Context header (repeated in every chunk of this corpus):** Spell Chess is the
 > chess.com 2-player variant at `https://www.chess.com/variants/spell-chess`. Orthodox
 > chess plus two castable spells (**freeze**, **jump**). This corpus is the ground-truth
-> rule reference, derived from and verified against chess.com's own client engine.
+> rule reference, derived from and verified against chess.com's own client engine,
+> **bundle `variants/2026.8.1`, last verified 2026-08-09**.
+>
+> **Only ever open the `/analysis` page of that URL.** Every other chess.com page can
+> match an automated client into a live game against a human, which would be a
+> terms-of-service violation.
 
 ## How to use this corpus
 
@@ -27,7 +32,16 @@ audience: AI coding agent building a Spell Chess bot
    - `[DOC]` — from chess.com's own prose (help centre / in-client queue description).
    - `[UNVERIFIED]` — inference. Treat as a hypothesis; confirm before relying on it.
 4. **When code and prose disagree, code wins.** chess.com's public help pages contain
-   at least three outright errors (see `00-overview.md#known-errors-in-public-sources`).
+   at least three outright errors (see
+   [`00-overview.md#known-errors-in-public-sources`](00-overview.md#known-errors-in-public-sources)).
+5. **Check the pin before trusting a `[VERIFIED]` tag.** Every such tag means "observed in
+   bundle `variants/2026.8.1`". That bundle is live third-party code and chess.com can
+   change it without notice. If freeze or jump semantics move, these tags become false
+   **silently**: `crates/core/tests/oracle_vectors.rs` was generated from the old bundle,
+   so it will keep passing and keep confirming the stale behaviour.
+   `.github/workflows/engine-version-check.yml` watches the pinned bundle weekly and opens
+   an issue if it stops resolving — but a bundle that changes *behaviour* under the same
+   version string would slip past it.
 
 ## Routing table
 

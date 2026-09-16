@@ -8,18 +8,31 @@ paragraph — if it blocks you, it is right and you should not work around it.
 ## Where knowledge lives
 
 - [`rules/INDEX.md`](rules/INDEX.md) — the rules. Read before writing move-generation code.
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the ~9,600 lines fit together, and
-  which two files hold most of the difficulty.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the Rust fits together, and which
+  two files hold most of the difficulty.
+- [`docs/WEB.md`](docs/WEB.md) — the browser build: `crates/wasm`, the worker protocol,
+  the JSON contract with `web/`, and the wasm-only traps.
 - `/perf-measurement` skill — before benchmarking or optimizing anything.
 - `/spell-legality-testing` skill — before touching freeze/jump legality or its tests.
 - GitHub issues — the open backlog, including work deliberately paused.
 
 ## Workspace
 
-Three-crate Cargo workspace: `crates/core` (board, movegen, rules engine — no internal deps),
+Four-crate Cargo workspace: `crates/core` (board, movegen, rules engine — no internal deps),
 `crates/search` (search algorithms, depends on `core`), `crates/cli` (the `spellchess` binary,
-depends on both). `cargo build --workspace` / `cargo test --workspace` cover everything; scope
-to `-p spellchess-core` etc. to iterate on one crate.
+depends on both), and `crates/wasm` (the `wasm-bindgen` boundary for the browser front end in
+`web/`, depends on both). Scope to `-p spellchess-core` etc. to iterate on one crate.
+
+`cargo build --workspace` / `cargo test --workspace` do **not** cover everything. Two carve-outs:
+
+1. The `#[cfg(target_arch = "wasm32")]` half of `crates/wasm/src/lib.rs`. A native build never
+   compiles it; only `wasm-pack build crates/wasm --target web` does, which CI runs on every PR
+   via `.github/workflows/pages.yml`. Nothing in `web/` is covered at all.
+2. `crates/core/fuzz/`, below.
+
+**If you change `spellchess-core`'s public API, four things can break and only one of them is
+in `--workspace`:** `crates/wasm/src/view.rs`, the JSON shape `web/app.js` reads (see
+[`docs/WEB.md`](docs/WEB.md)), the wasm32-only half of `lib.rs`, and the fuzz targets.
 
 `crates/core/fuzz/` is a `cargo-fuzz` crate (targets `fuzz_freeze` and `fuzz_jump`) with its own
 `[workspace]` table, deliberately isolated from the root workspace — so it is **not** covered by

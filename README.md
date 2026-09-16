@@ -14,29 +14,44 @@ The engine is compiled to WebAssembly and published at
 with no server component. `.github/workflows/pages.yml` rebuilds and redeploys it on
 every push to `main`.
 
-To run the site locally:
+To run the site locally you need the wasm target and `wasm-pack`, neither of which comes
+with a default toolchain:
 
 ```bash
+rustup target add wasm32-unknown-unknown
+cargo install wasm-pack          # CI pins v0.15.0 from a prebuilt tarball
+
 wasm-pack build crates/wasm --target web --out-dir ../../web/pkg --release
 python3 -m http.server -d web 8099
 ```
 
 Then open <http://localhost:8099/>. `web/pkg/` is generated and gitignored.
 
+The same workflow also builds to wasm on **every pull request**, purely as a type-check:
+the `#[cfg(target_arch = "wasm32")]` half of `crates/wasm/src/lib.rs` is invisible to
+`cargo test`. The deploy uploads *all* of `web/`, so anything left there is published.
+[`docs/WEB.md`](docs/WEB.md) covers the architecture and the wasm-only traps.
+
 ## What's here
 
-A Rust workspace with a rules-accurate move generator, a parallel alpha-beta search, and a
-REPL to drive both:
+A Rust workspace with a rules-accurate move generator, an alpha-beta search, a REPL to
+drive both, and a WebAssembly build behind the site:
 
 | Crate | Covers |
 |---|---|
 | [`crates/core`](crates/core) | Board representation, legal move/spell generation, the rules engine. No internal deps. |
-| [`crates/search`](crates/search) | Alpha-beta search with quiescence and Lazy-SMP, built on `core`. |
+| [`crates/search`](crates/search) | Alpha-beta search with quiescence, built on `core`. Lazy-SMP is implemented but defaults **off** — it measured a net loss here. |
 | [`crates/cli`](crates/cli) | The `spellchess` binary: a REPL for playing out positions and asking the engine for a move. |
+| [`crates/wasm`](crates/wasm) | The `wasm-bindgen` boundary: `lib.rs` is the browser shell, `view.rs` the natively-testable JSON layer. |
+| [`web/`](web) | The static front end — `app.js` (view), `worker.js` (owns the game), `primer.js` (rules cards). See [`docs/WEB.md`](docs/WEB.md). |
 
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) explains how those fit together, which two
 files hold most of the difficulty, and the invariants a change has to preserve. Read it
-before making a non-trivial change.
+before making a non-trivial change. [`docs/WEB.md`](docs/WEB.md) does the same for the
+browser build.
+
+Commits use [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`,
+`docs:`, …).
 
 ## Build and run
 

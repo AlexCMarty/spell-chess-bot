@@ -1,8 +1,9 @@
 # Architecture
 
-Orientation for the ~9,600 lines of Rust in `crates/`. For the *rules* this engine
-implements, start at [`rules/INDEX.md`](../rules/INDEX.md) instead — this file assumes you
-already know that a turn is one optional spell plus one mandatory move.
+Orientation for the Rust in `crates/`. For the *rules* this engine implements, start at
+[`rules/INDEX.md`](../rules/INDEX.md) instead — this file assumes you already know that a
+turn is one optional spell plus one mandatory move. For the browser build — `crates/wasm`,
+the worker protocol, the JSON contract with `web/` — see [`WEB.md`](WEB.md).
 
 ## The idea that shapes everything
 
@@ -25,7 +26,8 @@ staying provably identical to it. Once you see that, the module layout follows.
 |---|---|---|
 | `crates/core` | nothing internal | Board, move generation, spells, legality. The rules engine. |
 | `crates/search` | `core` | Alpha-beta with quiescence, transposition table, move ordering, evaluation. |
-| `crates/cli` | both | The `spellchess` REPL binary. |
+| `crates/cli` | `core` + `search` | The `spellchess` REPL binary. |
+| `crates/wasm` | `core` + `search` | The browser boundary. `lib.rs` is the `wasm-bindgen` shell (its bulk is `#[cfg(target_arch = "wasm32")]`, so **no native build compiles it**); `view.rs` is the testable JSON layer. See [`WEB.md`](WEB.md). |
 | `crates/core/fuzz` | `core` | `cargo-fuzz` targets. **Own `[workspace]` table — not built or tested by `--workspace`.** |
 
 ## Where the difficulty actually lives

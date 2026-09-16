@@ -201,9 +201,13 @@ or into check.
 
 ## Threat detection for bots
 
-`[VERIFIED]` A Spell Chess engine that only asks "am I in check?" will lose to spell tactics.
-Before committing to a move, evaluate whether the resulting position lets the opponent win
-**in a single turn**. The opponent's one-turn resources are:
+`[UNVERIFIED]` Everything in this section is engineering judgement built *on top of* the
+verified rules it cites — it is not itself something executing chess.com's engine can prove,
+so it carries the inference tag even though each underlying rule is `[VERIFIED]`.
+
+An engine that only asks "am I in check?" will lose to spell tactics. Before committing to a
+move, evaluate whether the resulting position lets the opponent win **in a single turn**. The
+opponent's one-turn resources are:
 
 1. **Jump → king capture.** For every enemy slider (Q/R/B), test whether it would attack your
    king if exactly one occupied square on the ray between them were made transparent. If so,

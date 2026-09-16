@@ -50,13 +50,11 @@ generation, not surfaced as "you have no moves" after the fact. Measured: a spar
 with Black to move holding only a king on `f6` and a pawn on `g4` (nothing else on the
 board for Black) had a 62-square freeze target list — every square *except* `f5` and `g5`,
 the only two centers whose 3×3 zone covers both `f6` and `g4` simultaneously, freezing
-Black's entire army in one cast. See `crates/core/tests/fixtures/sparse_03.json`. This
-exclusion happens to already fall out of `generate_turns`'s existing logic for free (a
-zero-legal-move hypothetical simply contributes no `Turn`s), so it required no production
-code change — only `crates/core/tests/oracle_vectors.rs` had to stop comparing against the
-raw `spells::freeze_targets`/`jump_targets` functions directly (which don't model this) and
-instead derive target lists from `generate_turns`'s actual output, matching the original
-Task 26 plan.
+Black's entire army in one cast. See `crates/core/tests/fixtures/sparse_03.json`.
+
+The same exclusion applies to jump — see [`40-jump.md#targeting`](40-jump.md#targeting).
+Note that `spells::freeze_targets`/`jump_targets` do **not** model it, so a target list must
+be derived from `generate_turns`'s output rather than from those functions directly.
 
 | Target | Zone shape | Squares |
 |---|---|---|

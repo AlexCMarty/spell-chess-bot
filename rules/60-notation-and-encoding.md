@@ -14,8 +14,12 @@ answers:
 # Spell Chess — Notation and Encoding
 
 > **Context:** Spell Chess is the chess.com 2-player variant. Orthodox chess plus two
-> castable spells (**freeze**, **jump**). This file specifies every serialisation format a
-> bot must read or write.
+> castable spells (**freeze**, **jump**). This file specifies the serialisation formats
+> **chess.com's engine** emits and accepts — read it when talking to the oracle.
+>
+> **This repo does not implement any of them.** Its own turn syntax is documented under
+> [This engine's own syntax](#this-engines-own-syntax) at the bottom; there is no SAN
+> parser, no SAN renderer, and no FEN reader or writer anywhere in `crates/`.
 
 ## Spell move notation
 
@@ -39,8 +43,11 @@ field**, which is a common parsing trap:
 
 ### King capture notation
 
-`[VERIFIED]` A move capturing the king is marked with an explicit `K` after the capture
-sign, and terminated with `#`:
+`[VERIFIED]` In `san` and `sanShort`, a move capturing the king is marked with an explicit
+`K` after the capture sign, and terminated with `#`. **`san8x8` has no such marker** — it
+renders a king capture as an ordinary capture, indistinguishable from any other. Since
+`san8x8` is otherwise the form recommended above, a bot that reads only `san8x8` cannot
+detect a king capture from the string and must use `gameOver()` / `termination()` instead:
 
 ```
 sanShort : "jump@g5 BxKh4#"      ← xK = king captured
@@ -165,7 +172,33 @@ When writing a parser, get these five things right:
 4. `[VERIFIED]` `<type>_<lock>x<count>` — lock first, count second.
 5. `[VERIFIED]` A PGN move number spans four seats, two of which are `..`.
 
+## This engine's own syntax
+
+Everything above describes **chess.com's** wire format. This repo implements none of it.
+What `crates/core/src/notation.rs` actually parses and emits is long algebraic:
+
+```
+e2e4                 a plain move
+b7b8q                promotion — suffix is one of q r b n
+freeze@d5 g8f6       a cast, then the mandatory move
+jump@d7 d8d2         same shape for jump
+```
+
+- **Lowercase only.** `E2E4` and `freeze@D5 e2e4` are both rejected; so is `b7b8Q`.
+- **The separator is exactly one space**, and the spell prefix is `<freeze|jump>@<square>`.
+- **A turn is validated as a whole**, against `generate_turns` — not move-then-spell
+  separately — because the cast changes which moves are legal. An input that parses but
+  isn't in that list comes back as `illegal turn: …`.
+- There is **no SAN parser or renderer**, and **no FEN reader or writer**. The `fen` command
+  in the REPL is `format!("{:?}")` of the `Position` with no matching parser, so nothing
+  round-trips through a string.
+- Positions are exchanged in tests as the JSON fixture format in
+  `crates/core/tests/fixtures/`, not as FEN. Note its field representation differs from the
+  wire format above: `expires_after_ply` counts **up**, where the engine's `life` counts
+  **down**.
+
 ## See also
 
 - Coordinate model → [`00-overview.md#coordinate-model`](00-overview.md#coordinate-model)
 - Driving the engine → [`70-engine-api.md`](70-engine-api.md)
+- The browser boundary's JSON shapes → [`../docs/WEB.md`](../docs/WEB.md)

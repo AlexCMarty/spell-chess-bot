@@ -36,22 +36,28 @@
       <div class="diagram" data-diagram></div>
       <div class="diagram-caption" data-caption></div>
       <h2 class="card-title">Freeze</h2>
-      <p class="card-body">Five per game. Locks a 3×3 area for a turn — nothing inside can move,
-      and frozen pieces stop giving check entirely. It catches your own pieces too.</p>
+      <p class="card-body">Five per game. Locks a 3×3 area for the rest of your turn and all of
+      your opponent's next one. Nothing standing inside can move, and a frozen piece controls
+      nothing at all — no check, no defence, no pins. It freezes your own pieces too, and it
+      lands <em>before</em> your move.</p>
     </article>
     <article class="card elev-sm" data-card="jump">
       <div class="diagram" data-diagram></div>
       <div class="diagram-caption" data-caption></div>
       <h2 class="card-title">Jump</h2>
-      <p class="card-body">Two per game. Makes one occupied square see-through for a turn, so
-      rooks, bishops and queens slide straight past the piece standing there — for both players.</p>
+      <p class="card-body">Two per game. Makes one occupied square transparent for the rest of your
+      turn and all of your opponent's next one, so rooks, bishops and queens slide straight past the
+      piece standing there — for both players. You can still capture that piece; and a check fired
+      through the square can't be blocked by landing on it.</p>
     </article>
     <article class="card elev-sm" data-card="king">
       <div class="diagram" data-diagram></div>
       <div class="diagram-caption" data-caption></div>
       <h2 class="card-title">King capture</h2>
       <p class="card-body">A spell can open an attack your opponent never had a chance to answer —
-      so the king can simply be captured, and that wins the game on the spot.</p>
+      so the king can simply be captured, and that wins the game on the spot. For the same reason a
+      mate isn't a mate while the defender still holds a spell off cooldown: one cast can conjure a
+      legal move out of nothing.</p>
     </article>
   </section>
 
@@ -62,6 +68,7 @@
       <div class="stage-main">
         <div class="statusbar">
           <span id="status" class="status" aria-live="polite">Loading engine…</span>
+          <span class="hint">You play White; the engine answers as Black.</span>
           <span class="nav-spacer"></span>
           <span id="hint" class="hint"></span>
         </div>
@@ -123,6 +130,10 @@
               <option value="10000">10 seconds</option>
             </select>
           </label>
+          <p class="panel-note">Each row is one completed search depth: how deep it looked, the
+          score in pawns from White's point of view (positive favours White, <code>M3</code> means a
+          forced win in 3), and the turn it would play. Thinking time sets the engine's strength and
+          also budgets the button below.</p>
           <table id="analysis" class="analysis"></table>
           <button id="analyze" class="btn btn-ghost analyze-btn" type="button">Analyse this position</button>
         </div>

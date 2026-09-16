@@ -100,9 +100,15 @@ White's turn *N*:
 | after Black's reply | 0 |
 | White's turn *N+3* | **0 → castable** |
 
-**Rule of thumb:** having cast a spell on your turn *N*, you may cast it again on your turn
-***N+3***. Turns *N+1* and *N+2* are blocked. This matches chess.com's "recharge after 3
-full turns" and "you cannot cast the same spell two moves in a row".
+`[VERIFIED]` **Rule of thumb:** having cast a spell on your turn *N*, you may cast it again
+on your turn ***N+3***. Turns *N+1* and *N+2* are blocked — that is **two** of your own turns
+lost, not three.
+
+`[DOC]` chess.com describes this as "recharge after 3 full turns" and "you cannot cast the
+same spell two moves in a row". The first is consistent with the measurement; the second
+understates the lock by a turn, since "two moves in a row" would permit a recast on *N+2*,
+which is blocked. And "recharge" refers to the **cooldown only** — the count never comes
+back (see [Spell economy](#spell-economy)).
 
 ### Cooldown is not just an inconvenience
 

@@ -248,28 +248,47 @@ function renderStatus() {
       : state.sideToMove === "white" ? "Your move" : "Black to move");
 
   const { frozen, jumped } = activeFields();
-  let hint = "spells ready";
+  let hint = spellReadiness();
   if (armed === "freeze") hint = "pick a square to freeze";
   else if (armed === "jump") hint = "pick a piece to see through";
-  else if (staged) hint = `${staged.kind} staged — now move`;
-  else if (frozen.size) hint = "frost on the board";
+  else if (staged) hint = `${staged.kind} cast — now make your move`;
+  else if (frozen.size) hint = "a freeze field is live";
   else if (jumped.size) hint = "a square is transparent";
   $("hint").textContent = over ? "" : hint;
+}
+
+// Never assert "spells ready" without checking. A spell is castable only when it
+// has charges left AND its cooldown has run out; saying otherwise is the single
+// most misleading thing this status line can do.
+function spellReadiness() {
+  const ready = [];
+  const waiting = [];
+  let spent = 0;
+  for (const kind of ["freeze", "jump"]) {
+    const { count, lock } = state.spells.white[kind];
+    if (count === 0) spent++;
+    else if (lock > 0) waiting.push(`${kind} in ${lock}`);
+    else ready.push(kind);
+  }
+  if (ready.length === 2) return "both spells ready";
+  if (ready.length === 1) return `${ready[0]} ready`;
+  if (waiting.length) return `on cooldown — ${waiting.join(", ")}`;
+  return spent ? "no spells left" : "no spell available";
 }
 
 function renderCoach() {
   const { frozen } = activeFields();
   let text;
   if (armed === "freeze") {
-    text = "Freeze locks a 3×3 block for one turn — your own pieces included. Tap the centre square.";
+    text = "Freeze locks a 3×3 block until your opponent's next turn ends — your own pieces included, and it lands before your move. Tap the centre square.";
   } else if (armed === "jump") {
     text = "Jump makes one occupied square transparent to sliding pieces, for both sides. Tap the piece to see through.";
   } else if (staged) {
     text = "The spell is cast and its field is live. You still owe a piece move this turn — or cancel to take the spell back.";
   } else if (!inProgress()) {
-    text = "Start a new game whenever you like. Undo steps back a full turn.";
+    text = "Start a new game whenever you like. Undo takes back your last move and the engine's reply.";
   } else if (frozen.size) {
-    text = "Anything inside the frost can't move and gives no check until the field expires.";
+    text = "Anything inside the field can't move, and controls nothing while frozen — no check, no defence, no pins.";
   } else {
     text = "Tap one of your pieces to see where it can go. Cast a spell first if you want to change what's possible.";
   }
@@ -287,8 +306,15 @@ function renderDock() {
 
     btn.disabled = !myTurn() || staged !== null || spellTargets(kind).size === 0;
     btn.setAttribute("aria-pressed", String(armed === kind));
+    // Show the count even while locked: the pips render it regardless, so
+    // replacing the label with the cooldown made the two widgets disagree.
     btn.querySelector("[data-sub]").textContent =
-      counter.lock > 0 ? `cooldown ${counter.lock}` : `${left} left`;
+      counter.lock > 0
+        ? `${left} left · ready in ${counter.lock} ${counter.lock === 1 ? "turn" : "turns"}`
+        : `${left} left`;
+    btn.title =
+      `${CHARGES[kind]} per game, never replenished. After casting, ` +
+      `wait 3 of your own turns before casting ${kind} again.`;
 
     const pips = btn.querySelector("[data-pips]");
     pips.replaceChildren();
