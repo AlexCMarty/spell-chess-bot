@@ -111,6 +111,24 @@ prove; return `NeedsRescan`.
   it is found rather than reading it back out of the TT afterwards. Both were real bugs.
 - **Quiescence never probes the TT.** ~87% of nodes are quiescence nodes, which is why
   Lazy-SMP does not pay here (see the `perf-measurement` skill).
+- **A node that searched a truncated spell list may not store an `Exact` or `Upper`
+  bound.** `search.rs`'s `alphabeta` decides `full_spells` from
+  `ply == 0 || in_check || (is_pv && depth <= 3) || no_spell_empty`; when it is false the
+  node skips the TT store **entirely** unless it failed high (`if !(full_spells || best >=
+  beta) { return Some(best); }`). A truncated list can only miss a *better* move, so the
+  score is a valid `Lower` bound and nothing else. Deleting that early return as a
+  "why does this node sometimes not store?" cleanup poisons the table with scores that
+  can only be underestimates.
+- **Null-move pruning is disabled whenever any of our own pieces is frozen.**
+  `search.rs` computes `frozen_us` from `spells::frozen_bb(pos)` intersected with the
+  side to move and gates the null move on `!frozen_us`. This reads like an optimisation
+  gate and is a correctness guard: a frozen side can sit in zugzwang-like states that the
+  null move models wrongly. Do not widen it.
+- **Spell and no-spell pairings of the same move are not duplicates.**
+  `dedup_captures` in `search.rs` must keep two turns with identical `from`/`to`/
+  `promotion` that differ only in their spell. Collapsing them on the move triple alone —
+  which is exactly what a dedup helper looks like it ought to do — drops the
+  freeze-then-capture and jump-then-capture pairings that quiescence exists to see.
 
 ## Tests
 
