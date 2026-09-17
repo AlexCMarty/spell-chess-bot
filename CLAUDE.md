@@ -77,7 +77,10 @@ disagree, code wins.
 - **Use `--no-fail-fast` for mutation testing.** Plain `cargo test` stops at the first
   failing target and will mis-attribute kills.
 - `cargo` may be at `~/.cargo/bin/cargo` and not on `PATH`. Release builds take a couple of
-  minutes and a depth-8 benchmark ~90–150s — budget long timeouts rather than assuming a hang.
+  minutes, and a depth-8 benchmark took ~90–150s **on a Raspberry Pi 5** — budget long
+  timeouts rather than assuming a hang. That figure is a historical data point for sizing a
+  timeout, never a target: see the `/perf-measurement` skill, which says to establish your
+  own baseline and work in ratios.
 
 ## Commits
 
