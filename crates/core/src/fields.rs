@@ -29,7 +29,10 @@ impl FieldSet {
                 return;
             }
         }
-        panic!("FieldSet capacity (4) exceeded -- see the concurrency-bound analysis in the design doc");
+        panic!(
+            "FieldSet capacity (4) exceeded -- at most 2 fields can be live at once; \
+             see the bound argument on this type and rules/20-spell-system.md#how-many-fields-can-be-live-at-once"
+        );
     }
 
     pub fn retain(&mut self, mut f: impl FnMut(&SpellField) -> bool) {

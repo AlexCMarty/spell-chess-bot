@@ -808,6 +808,18 @@ pub fn generate_search_spell_turns(pos: &Position, baseline: &[PieceMove]) -> Ve
     )
 }
 
+/// Apply a full turn (optional spell + mandatory piece move).
+///
+/// **Precondition:** if `turn.spell` is `Some`, the mover must actually be able to
+/// afford that cast -- `spells::castable()` must hold for it in `pos`. Every
+/// production caller reaches this through `generate_turns`, which only ever emits
+/// affordable casts, so the precondition holds by construction there. A
+/// hand-built `Turn` (a test, a fuzz target, a future caller) can violate it.
+///
+/// Violating it is caught by a `debug_assert!` in debug and fuzz builds. In release
+/// the decrement saturates at zero rather than wrapping to 255: the position that
+/// comes back is wrong either way, but a saturated count cannot make the search
+/// explore a game with 255 charges of a spell.
 pub fn apply_turn(pos: &Position, turn: &Turn) -> Position {
     let mover = pos.side_to_move;
     let mut next = apply_move_only(pos, &turn.mv);
@@ -822,7 +834,13 @@ pub fn apply_turn(pos: &Position, turn: &Turn) -> Position {
             (SpellKind::Jump, Color::White) => &mut next.white_spells.jump,
             (SpellKind::Jump, Color::Black) => &mut next.black_spells.jump,
         };
-        counter.count -= 1;
+        debug_assert!(
+            counter.count > 0,
+            "apply_turn: {:?} cast {:?} with no charges left -- callers must pre-validate with spells::castable()",
+            mover,
+            cast.kind,
+        );
+        counter.count = counter.count.saturating_sub(1);
         counter.lock = 3;
     }
 
@@ -846,6 +864,36 @@ mod tests {
     use crate::board::Board;
     use crate::position::{Position, SpellCounter, CastleRights};
     use crate::types::{Color, PieceKind};
+
+    /// `apply_turn`'s documented precondition: a cast the mover cannot afford.
+    /// Debug-only, because the guard is a `debug_assert!` -- in release the
+    /// decrement saturates instead, which is the behaviour the next test pins.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "with no charges left")]
+    fn apply_turn_rejects_a_cast_the_mover_cannot_afford() {
+        let mut pos = Position::starting();
+        pos.white_spells.freeze = SpellCounter { count: 0, lock: 0 };
+        let turn = Turn {
+            spell: Some(SpellCast { kind: SpellKind::Freeze, square: Square::from_str("d5").unwrap() }),
+            mv: PieceMove::quiet(Square::from_str("e2").unwrap(), Square::from_str("e4").unwrap()),
+        };
+        apply_turn(&pos, &turn);
+    }
+
+    /// In release the same turn must not wrap the count to 255 -- a position with
+    /// 255 charges would let the search explore a game that cannot happen.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn apply_turn_saturates_rather_than_wrapping_an_unaffordable_cast() {
+        let mut pos = Position::starting();
+        pos.white_spells.freeze = SpellCounter { count: 0, lock: 0 };
+        let turn = Turn {
+            spell: Some(SpellCast { kind: SpellKind::Freeze, square: Square::from_str("d5").unwrap() }),
+            mv: PieceMove::quiet(Square::from_str("e2").unwrap(), Square::from_str("e4").unwrap()),
+        };
+        assert_eq!(apply_turn(&pos, &turn).white_spells.freeze.count, 0);
+    }
 
     fn dests(pos: &Position, sq: Square) -> Vec<Square> {
         let mut v: Vec<Square> = legal_moves(pos).into_iter().filter(|m| m.from == sq).map(|m| m.to).collect();
