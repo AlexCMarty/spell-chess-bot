@@ -325,10 +325,42 @@ function renderDock() {
     }
   }
 
+  renderOpponentSpells();
+
   $("cancel-spell").hidden = staged === null;
   $("undo").disabled = thinking || moveLog.length === 0;
   $("analyze").disabled = thinking || !inProgress();
   $("millis").disabled = thinking;
+}
+
+// Black's counters cross the wasm boundary in `state_json` already; this only
+// renders them. Same readiness rule as `spellReadiness`: charges left AND lock
+// clear, never one without the other.
+function renderOpponentSpells() {
+  for (const kind of ["freeze", "jump"]) {
+    const { count, lock } = state.spells.black[kind];
+    const host = document.querySelector(`.opp-spell[data-kind="${kind}"]`);
+
+    let sub;
+    if (count === 0) sub = "spent";
+    else if (lock > 0) sub = `${count} left · ready in ${lock} ${lock === 1 ? "turn" : "turns"}`;
+    else sub = `${count} left · ready`;
+    host.querySelector("[data-opp-sub]").textContent = sub;
+    host.classList.toggle("is-ready", count > 0 && lock === 0);
+    host.title =
+      count === 0
+        ? `Black has no ${kind} left — spell counts never replenish.`
+        : `Black holds ${count} ${kind}${count === 1 ? "" : "s"}` +
+          (lock > 0 ? `, castable again in ${lock} of Black's turns.` : ", castable right now.");
+
+    const pips = host.querySelector("[data-opp-pips]");
+    pips.replaceChildren();
+    for (let i = 0; i < CHARGES[kind]; i++) {
+      const pip = document.createElement("i");
+      if (i < count) pip.className = "on";
+      pips.append(pip);
+    }
+  }
 }
 
 function renderMoves() {

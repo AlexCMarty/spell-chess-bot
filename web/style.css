@@ -442,6 +442,37 @@ code { font-family: ui-monospace, Menlo, monospace; }
 .spell-btn[data-kind="freeze"] .pips i.on { background: var(--freeze-pip); }
 .spell-btn[data-kind="jump"] .pips i.on { background: var(--color-accent-700); }
 
+/* Black's spell state — a readout, not a control, so it is deliberately quieter
+   than the dock buttons it mirrors. */
+.opp-spells {
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--space-3);
+  background: var(--panel-fill);
+  border: 1.5px solid var(--panel-border);
+  border-radius: var(--radius-md);
+}
+.opp-who {
+  font-family: var(--font-heading);
+  font-size: 14px;
+  opacity: .75;
+}
+.opp-spell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.opp-name { font-family: var(--font-body); font-size: 13px; font-weight: 700; }
+.opp-sub { font-family: var(--font-body); font-size: 13px; opacity: .8; }
+.opp-spell[data-kind="freeze"] .pips i.on { background: var(--freeze-pip); }
+.opp-spell[data-kind="jump"] .pips i.on { background: var(--color-accent-700); }
+.opp-spell.is-ready .opp-name { text-decoration: underline; text-underline-offset: 3px; }
+
 .dock-actions {
   flex: 1 1 130px;
   display: flex;
