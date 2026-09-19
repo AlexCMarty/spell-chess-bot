@@ -118,6 +118,16 @@ fn legal_ctx(pos: &Position, mover: Color) -> Option<LegalCtx> {
 // proof -- it only fires if you update the count, and the differential batteries
 // only catch a missed filter when they happen to generate the geometry. Read
 // `freeze_captures`' doc comment before touching anything here.
+//
+// Mutation-tested (`cargo test --workspace --no-fail-fast`, one guard disabled
+// at a time): each of the six is killed by at least one named test, so none is
+// dead code. 1: `spell_delta::freeze_that_legalises_taking_a_frozen_enemy_king_declines`
+// et al.; 2: `spell_delta::an_en_passant_capture_unlocked_by_freezing_the_x_ray_rook_declines`
+// (only killer -- its no-spell baseline assertion is what dies); 3: ten tests
+// across core/search/wasm; 4: `legal::legal_captures_only_king_survives_in_double_check`
+// et al.; 5 (ray containment): `legal_moves_soundness::jumped_pinner_still_pins_the_blocking_pawn`
+// et al.; 5 (jump-square rescan arm): `legal::legal_captures_declines_pinned_piece_capturing_onto_live_jump_square`
+// et al.; 6: twenty tests across every crate, including `oracle_vectors`.
 #[inline(always)]
 fn move_survives(pos: &Position, mv: &PieceMove, ctx: &LegalCtx) -> bool {
     let dest_piece = pos.board.get(mv.to);
