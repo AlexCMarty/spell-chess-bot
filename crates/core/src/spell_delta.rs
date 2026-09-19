@@ -1469,4 +1469,164 @@ mod tests {
             "fixture is wrong: the walk must skip the non-matching knight on g4 (transparent) and find the rook on g5",
         );
     }
+
+    /// The `JumpExposure` precompute's actual contract, brute-forced against
+    /// `attackers_to`.
+    ///
+    /// `jump_captures` computes `checkers_after` as
+    /// `ctx.checkers.union(ctx.jump_exposure.revealed_by(s))` rather than calling
+    /// `attackers_to` fresh for every target, and then leans on it twice: it
+    /// declines as a double check when the count exceeds one, and it filters
+    /// slider captures down to `single_checker` otherwise. Under-reporting there
+    /// is silent unsoundness -- the delta returns `Delta::Complete` and emits
+    /// captures that do not answer the check. This asserts the equality that
+    /// makes the substitution valid, for *every* square on the board:
+    ///
+    /// ```text
+    /// ctx.checkers | jump_exposure.revealed_by(s) == attackers_to(king, occ minus (jump | s))
+    /// ```
+    ///
+    /// **Why brute force and not more fixtures.** The three hand-built fixtures
+    /// above pin three specific geometries; they do not pin the contract. Mutation
+    /// testing (2026-09-19) ran nine mutants of `jump_exposure_scan` against the
+    /// whole `-p spellchess-core` suite. Six died. Three survived, and each one is
+    /// real unsoundness -- checked against the rescan oracle, each produced four
+    /// `Delta::Complete` move sets the oracle disagreed with, out of 52,728
+    /// stacked-jump casts (~1 in 13,000, the thin-shell frequency the
+    /// `/spell-legality-testing` skill says random batteries coin-flip on):
+    ///
+    /// - `revealed = Bitboard::from_square(next)` instead of `revealed.with(next)`
+    ///   (last attacker wins instead of accumulating),
+    /// - `break`ing at the first matching attacker instead of walking on,
+    /// - finding `blocker` via `real_occ` instead of `slider_occ` (wrong blocker
+    ///   when the ray's first piece already stands on a transparent square).
+    ///
+    /// All three live in stacked transparency -- the failure mode that shipped
+    /// twice during this precompute's development -- and all three die here.
+    ///
+    /// **Why this shape and size.** Each ray from the king gets up to three slots,
+    /// each independently empty or one of six pieces, each piece independently
+    /// carrying a live jump field or not. Stacked fields on one line are therefore
+    /// reachable, which is the whole point: that is the only way `revealed` ever
+    /// holds more than one attacker. Two king squares cover full-length rays (d4)
+    /// and rays truncated by the edge (b2). This is a deliberately trimmed sweep:
+    /// it kills all three survivors in ~1.5M checks and runs in the default debug
+    /// suite. It is NOT `#[ignore]`d on purpose -- an ignored battery never runs
+    /// under `cargo test --workspace`, so a regression only it would catch reads
+    /// as green.
+    ///
+    /// **What it does not cover.** The sweep places jump fields only, never freeze
+    /// fields, so `jump_exposure_scan`'s `!frozen.contains(next)` guard is invisible
+    /// to it -- that guard is killed by `a_frozen_revealed_piece_does_not_count_as_
+    /// exposure` instead. It is also single-ray: every piece sits on one line
+    /// through the king, so the `pairs: [_; 8]` bound and multi-line interaction go
+    /// untested here. Re-run the mutation set if you widen either. Between this test
+    /// and the fixtures above, all nine mutants tried die.
+    #[test]
+    fn jump_exposure_matches_a_brute_force_attackers_to_sweep() {
+        // Enemy sliders (the things that can be revealed), an enemy knight and an
+        // own slider (things that must NOT be), covering both ray parities.
+        const POOL: [(Color, PieceKind); 6] = [
+            (Color::Black, PieceKind::Rook),
+            (Color::Black, PieceKind::Bishop),
+            (Color::Black, PieceKind::Queen),
+            (Color::Black, PieceKind::Knight),
+            (Color::White, PieceKind::Rook),
+            (Color::White, PieceKind::Queen),
+        ];
+        // Per slot: empty, or one of POOL with / without a live jump field.
+        const N_OPT: usize = 1 + POOL.len() * 2;
+
+        let mut checks = 0usize;
+        let mut exposing = 0usize;
+        let mut stacked = 0usize;
+
+        for king_name in ["d4", "b2"] {
+            let king = sq(king_name);
+            for &dir in crate::rays::ROOK_DIRS.iter().chain(crate::rays::BISHOP_DIRS.iter()) {
+                // However many of the first three squares along `dir` are on the
+                // board -- one or two of them near an edge, which is the point of
+                // the b2 pass.
+                let slots: Vec<Square> = (1..=3i8)
+                    .filter_map(|d| {
+                        let f = king.file() as i8 + dir.0 * d;
+                        let r = king.rank() as i8 + dir.1 * d;
+                        ((0..8).contains(&f) && (0..8).contains(&r))
+                            .then(|| Square::new(f as u8, r as u8))
+                    })
+                    .collect();
+                if slots.is_empty() {
+                    continue;
+                }
+
+                for code in 0..N_OPT.pow(slots.len() as u32) {
+                    let mut pos = empty_board();
+                    put(&mut pos, king_name, Color::White, PieceKind::King);
+                    // h6 is the parking square because it lies on no rank, file or
+                    // diagonal through either d4 or b2 -- so the enemy king never
+                    // blocks a ray under test, and never lands behind the slots as
+                    // an accidental extra piece. (h8, the obvious choice, is on the
+                    // a1-h8 diagonal and therefore on the NE ray of both.)
+                    put(&mut pos, "h6", Color::Black, PieceKind::King);
+
+                    let mut c = code;
+                    for &s in slots.iter() {
+                        let o = c % N_OPT;
+                        c /= N_OPT;
+                        if o == 0 {
+                            continue;
+                        }
+                        let (color, kind) = POOL[(o - 1) / 2];
+                        pos.board.set(s, Some(crate::types::Piece { color, kind }));
+                        if (o - 1) % 2 == 1 {
+                            pos.fields.push(crate::position::SpellField {
+                                square: s,
+                                owner: Color::Black,
+                                kind: SpellKind::Jump,
+                                expires_after_ply: pos.ply + 1,
+                            });
+                        }
+                    }
+
+                    let ctx = NodeContext::new(&pos);
+                    let frozen = crate::spells::frozen_bb(&pos);
+                    let jump = crate::spells::jump_bb(&pos);
+                    let occ = pos.board.occupancy();
+
+                    for &(_, revealed) in ctx.jump_exposure.pairs[..ctx.jump_exposure.count].iter() {
+                        exposing += 1;
+                        if revealed.count() > 1 {
+                            stacked += 1;
+                        }
+                    }
+
+                    for t in 0..64u8 {
+                        let s = Square(t);
+                        // Exactly what `jump_captures` would see for a jump cast on
+                        // `s`: `s` becomes transparent on top of the live fields.
+                        let slider_occ_after = occ.minus(jump.with(s));
+                        let want = attackers_to(&pos, king, Color::Black, frozen, slider_occ_after);
+                        let got = ctx.checkers.union(ctx.jump_exposure.revealed_by(s));
+                        checks += 1;
+                        assert_eq!(
+                            got, want,
+                            "exposure invariant broken: king {king_name}, dir {dir:?}, \
+                             code {code}, jump@{s:?}",
+                        );
+                    }
+                }
+            }
+        }
+
+        // Anti-vacuity. A sweep that never builds an exposing geometry would pass
+        // with `revealed_by` hardwired to `Bitboard::EMPTY`, and one that never
+        // stacks two attackers on a line would pass with the walk deleted -- the
+        // exact two mutants this test exists to kill. Observed at the time of
+        // writing: 1,550,848 checks, 6,600 exposing geometries, 528 of them
+        // revealing two attackers at once. Bounds sit near half of each so
+        // ordinary refactors do not trip them.
+        assert!(checks > 1_000_000, "sweep shrank unexpectedly: only {checks} checks");
+        assert!(exposing > 3_000, "sweep built too few exposing geometries: {exposing}");
+        assert!(stacked > 250, "sweep built too few stacked-transparency reveals: {stacked}");
+    }
 }
