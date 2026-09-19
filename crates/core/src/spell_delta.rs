@@ -82,14 +82,13 @@ fn slider_scan(board: &Board, us: Color, frozen: Bitboard, slider_occ: Bitboard)
 /// fields are stacked on the same line). At most 8 entries: a square lies on
 /// at most one of the king's 8 lines.
 struct JumpExposure {
-    mask: Bitboard,
     count: usize,
     pairs: [(Square, Bitboard); 8],
 }
 
 impl JumpExposure {
     const EMPTY: JumpExposure =
-        JumpExposure { mask: Bitboard::EMPTY, count: 0, pairs: [(Square(0), Bitboard::EMPTY); 8] };
+        JumpExposure { count: 0, pairs: [(Square(0), Bitboard::EMPTY); 8] };
 
     /// The attacker(s) a jump on `s` would reveal (empty if none).
     fn revealed_by(&self, s: Square) -> Bitboard {
@@ -141,7 +140,6 @@ fn jump_exposure_scan(
             from = next;
         }
         if !revealed.is_empty() {
-            exp.mask = exp.mask.with(blocker);
             exp.pairs[exp.count] = (blocker, revealed);
             exp.count += 1;
         }
@@ -1369,7 +1367,7 @@ mod tests {
 
         let ctx = NodeContext::new(&pos);
         assert_eq!(ctx.jump_exposure.revealed_by(sq("d4")), Bitboard::from_square(sq("d8")));
-        assert_eq!(ctx.jump_exposure.mask.count(), 1, "only d4 should be recorded as exposed");
+        assert_eq!(ctx.jump_exposure.count, 1, "only d4 should be recorded as exposed");
     }
 
     /// A pre-existing jump field on the REVEALED square itself: jumping g3
