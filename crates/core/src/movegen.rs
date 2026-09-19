@@ -425,10 +425,45 @@ mod tests {
         sparse.board.set(Square::from_str("d8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
         sparse.board.set(Square::from_str("e8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
         battery.push(sparse);
+
+        // A near-promotion pawn with an enemy piece on *both* capture diagonals. Without
+        // it this battery never reached a capture at all -- `Position::starting()` has
+        // none, and `sparse`'s rook is blocked by its own pawn on d4 (that fixture is the
+        // jump fixture *without* the jump field) -- so the `assert_eq!` below compared two
+        // empty vectors and passed on any capture-ordering bug. Both diagonals are load
+        // bearing: they pin the `[-1, 1]` loop order in `pawn_capture_moves`, and landing
+        // on rank 8 pins the four-promotion burst `add_pawn_move` emits, which is the
+        // finest-grained ordering either generator produces and the only one no other
+        // fixture reaches. Reversing either order is otherwise invisible to the whole
+        // workspace suite, and it is not cosmetic: quiescence does not sort (neither
+        // `dedup_captures` nor its loop), so emission order is try order and a change here
+        // moves qnode counts.
+        let mut promo = Position { board: Board::empty(), ..Position::starting() };
+        promo.board.set(Square::from_str("e1").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        promo.board.set(Square::from_str("b7").unwrap(), Some(Piece { color: Color::White, kind: PieceKind::Pawn }));
+        promo.board.set(Square::from_str("a8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Rook }));
+        promo.board.set(Square::from_str("c8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::Knight }));
+        promo.board.set(Square::from_str("h8").unwrap(), Some(Piece { color: Color::Black, kind: PieceKind::King }));
+        battery.push(promo);
+
+        let mut captures = 0usize;
+        let mut capture_promotions = 0usize;
         for pos in battery {
             let expected: Vec<PieceMove> = pseudo_legal_moves(&pos).into_iter().filter(|m| is_cap(&pos, m)).collect();
             let actual = pseudo_legal_captures(&pos);
             assert_eq!(actual, expected, "order/set mismatch for side_to_move {:?}", pos.side_to_move);
+            captures += expected.len();
+            capture_promotions += expected.iter().filter(|m| m.promotion.is_some()).count();
         }
+
+        // Vacuity guard. Counted off `expected` (the `pseudo_legal_moves` oracle), not off
+        // `actual`, so a generator that silently stopped emitting captures fails the
+        // `assert_eq!` above rather than quietly weakening these bounds. This is the check
+        // whose absence let the battery sit vacuous; keep it if the fixtures are edited.
+        assert!(captures > 0, "fixtures are wrong: the battery must reach at least one capture");
+        assert_eq!(
+            capture_promotions, 8,
+            "fixtures are wrong: both capture diagonals must offer all four promotion pieces",
+        );
     }
 }
