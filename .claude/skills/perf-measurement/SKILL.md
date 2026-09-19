@@ -50,7 +50,11 @@ Run the `--ignored` suite before landing anything that touches
 ## Protocol for comparing two commits
 
 1. Build the baseline in a worktree at the old commit, **on the same machine**:
-   `git worktree add /tmp/base <commit> && cargo build --release`.
+   `git worktree add /tmp/base <commit> && (cd /tmp/base && cargo build --release --bins --examples)`.
+   The `cd` is not optional and the subshell is not decoration: without them the `&&`
+   runs `cargo build` in your *current* checkout and leaves `/tmp/base` unbuilt, so the
+   A/B below times the same binary twice. `--examples` is what builds `bench` and
+   `hotcost`; a plain `--release` does not.
 2. `SPELLCHESS_THREADS=1` for anything compared across commits. Multi-threaded timings
    vary run to run; single-threaded ones do not.
 3. Interleave the A/B runs rather than doing all of A then all of B — it cancels thermal

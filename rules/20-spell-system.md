@@ -145,6 +145,22 @@ hypothetical `Spell=2+…` game, fields would persist one extra turn and the "pi
 the zone become frozen" clause would start to matter; in the canonical game it effectively
 does not. See [`30-freeze.md#entering-a-zone`](30-freeze.md#entering-a-zone).
 
+### How many fields can be live at once
+
+`[CODE]` **At most two**, in the canonical game. Each side casts at most one spell per turn,
+and a field cast on ply `p` carries `expires_after_ply = p + 1` — so it is live for the
+caster's own move and the whole of the opponent's reply, then goes. The only moment two
+fields overlap is the instant after a cast: the mover's brand-new field, plus the
+opponent's field from the previous ply, which has not yet expired. Neither side can hold
+two of its own fields simultaneously, so the momentary maximum is 2 and the steady state
+is 1.
+
+This bound is load-bearing for the implementation, not just trivia: `FieldSet`
+(`crates/core/src/fields.rs`) is a fixed-capacity `[Option<SpellField>; 4]` and **panics**
+past four. The capacity is a 2x margin over the bound above. A longer `<fieldLife>` — a
+hypothetical `Spell=2+…` game — would raise the bound and the capacity would have to be
+revisited with it.
+
 ## Casting API shape
 
 `[VERIFIED]` A spell is expressed as a pseudo-move from a synthetic source square:

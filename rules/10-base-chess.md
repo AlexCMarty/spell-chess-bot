@@ -34,8 +34,8 @@ cast, **it resolves exactly as in standard chess**.
 | Castling, both sides | `[VERIFIED]` standard | Modified by freeze — see [`50-interactions.md#castling`](50-interactions.md#castling) |
 | Castling out of / through / into check | `[VERIFIED]` forbidden, as standard | |
 | Promotion on rank 8 / 1, to Q R B N | `[VERIFIED]` standard | Engine emits e.g. `b8=Q+` |
-| Threefold repetition | `[CODE]` standard | Position hashing includes spell state |
-| Fifty-move rule | `[CODE]` standard | `pliesTill50MoveRule()` |
+| Threefold repetition | `[CODE]` standard | Position hashing includes spell state. **Not adjudicated in this repo** — see [`50-interactions.md#draws`](50-interactions.md#draws) |
+| Fifty-move rule | `[CODE]` standard | `pliesTill50MoveRule()`. **Not adjudicated in this repo** |
 | Stalemate is a draw | `[VERIFIED]` standard | Termination string `"Stalemate • Draw"` |
 
 ## Modified rules

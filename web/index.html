@@ -73,6 +73,23 @@
           <span id="hint" class="hint"></span>
         </div>
 
+        <!-- "Does the opponent have a jump off cooldown right now?" is the central
+             defensive question of the variant (rules/50-interactions.md#threat-detection-for-bots),
+             so Black's counters stay on screen. The data was already in state_json. -->
+        <div class="opp-spells" id="opp-spells">
+          <span class="opp-who">Black</span>
+          <span class="opp-spell" data-kind="freeze">
+            <span class="opp-name">Freeze</span>
+            <span class="pips" data-opp-pips="freeze" aria-hidden="true"></span>
+            <span class="opp-sub" data-opp-sub="freeze">5 left</span>
+          </span>
+          <span class="opp-spell" data-kind="jump">
+            <span class="opp-name">Jump</span>
+            <span class="pips" data-opp-pips="jump" aria-hidden="true"></span>
+            <span class="opp-sub" data-opp-sub="jump">2 left</span>
+          </span>
+        </div>
+
         <div class="board-wrap">
           <div id="board" class="board" role="grid" aria-label="Spell Chess board"></div>
           <div id="burst" class="burst" aria-hidden="true" hidden></div>

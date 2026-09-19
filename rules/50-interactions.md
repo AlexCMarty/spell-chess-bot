@@ -147,13 +147,21 @@ isTerminal(player) :=
 
 ## Draws
 
-| Rule | Status |
-|---|---|
-| Stalemate | `[VERIFIED]` draw, subject to the escape hatch above |
-| Threefold repetition | `[CODE]` standard |
-| Fifty-move rule | `[CODE]` standard |
-| Insufficient material | `[CODE]` **suspended** while any player holds a nonzero spell count or any field is live |
-| Draw by agreement | `[CODE]` supported (`playDrawAgreed`) |
+> **Implementation status:** this section specifies **chess.com's** engine. Of the five
+> rules below, this repository implements **only stalemate**. `game_status`
+> (`crates/core/src/terminal.rs`) returns `InProgress | Checkmate | Stalemate |
+> KingCaptured` and nothing else: `Position::halfmove_clock` is maintained on every move
+> and never read, and there is no repetition table, no insufficient-material check, and no
+> draw-agreement path. Tracked as issue #11. Read the rest of this section as a
+> description of the reference engine, not of this codebase.
+
+| Rule | Status | In this repo |
+|---|---|---|
+| Stalemate | `[VERIFIED]` draw, subject to the escape hatch above | **implemented** |
+| Threefold repetition | `[CODE]` standard | not implemented |
+| Fifty-move rule | `[CODE]` standard | not implemented (`halfmove_clock` is tracked but unread) |
+| Insufficient material | `[CODE]` **suspended** while any player holds a nonzero spell count or any field is live | not implemented |
+| Draw by agreement | `[CODE]` supported (`playDrawAgreed`) | not implemented |
 
 `[CODE]` The insufficient-material suspension is a real rule change: K+B vs K is not
 automatically drawn in a Spell Chess game where spells remain.
