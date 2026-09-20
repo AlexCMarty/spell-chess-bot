@@ -4,6 +4,40 @@
 
 use spellchess_core::*;
 
+/// Multiplies every seeded battery's position count.
+///
+/// **Why these run by default rather than behind `#[ignore]`.** Gating them was considered
+/// and rejected for the reason already on record at `spell_delta.rs`'s
+/// `jump_exposure_matches_a_brute_force_attackers_to_sweep`: an ignored battery never runs
+/// under `cargo test --workspace`, so a regression only it would catch reads as green. That
+/// sweep runs ~1.5M checks in the default debug suite; these stay in the suite too.
+///
+/// **Why release runs more than debug.** Measured on this codebase, the same battery costs
+/// roughly 9x more in debug than in release, so a single count cannot serve both: sized for
+/// debug it wastes the release budget, sized for release it makes `cargo test --workspace`
+/// (which builds debug) painful. The default factor is therefore 1 in debug and
+/// [`RELEASE_FACTOR`] in release, which lands both around a few seconds.
+///
+/// `SPELLCHESS_BATTERY_SCALE=<n>` replaces the factor outright -- it does not compound with
+/// the release default -- so a deep sweep is predictable from the number alone:
+///
+/// ```sh
+/// SPELLCHESS_BATTERY_SCALE=500 cargo test -p spellchess-core --release --test spell_delta_soundness
+/// ```
+///
+/// An unparseable or zero value falls back to the default rather than panicking: a typo in
+/// an env var should not turn the suite red in a way that reads like a logic failure.
+fn scale(base: usize) -> usize {
+    const RELEASE_FACTOR: usize = 8;
+    let default = if cfg!(debug_assertions) { 1 } else { RELEASE_FACTOR };
+    let factor = std::env::var("SPELLCHESS_BATTERY_SCALE")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&f| f > 0)
+        .unwrap_or(default);
+    base.saturating_mul(factor)
+}
+
 fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E3779B97F4A7C15);
     let mut z = *state;
@@ -122,6 +156,7 @@ fn sparse_random_positions(seed: u64, count: usize) -> Vec<Position> {
         }
         pos.side_to_move = if splitmix64(&mut state) & 1 == 0 { Color::White } else { Color::Black };
         pos.ply = 8;
+        maybe_en_passant(&mut pos, &mut state);
         for _ in 0..(splitmix64(&mut state) % 3) {
             let square = Square((splitmix64(&mut state) % 64) as u8);
             let kind = if splitmix64(&mut state) & 1 == 0 { SpellKind::Freeze } else { SpellKind::Jump };
@@ -199,6 +234,7 @@ fn king_tangle_positions(seed: u64, count: usize) -> Vec<Position> {
 
         pos.side_to_move = if splitmix64(&mut state) & 1 == 0 { Color::White } else { Color::Black };
         pos.ply = 8;
+        maybe_en_passant(&mut pos, &mut state);
         let our_king = if pos.side_to_move == Color::White { wk } else { bk };
         for _ in 0..(splitmix64(&mut state) % 3) {
             // Half the time anchor the field on or beside our own king, so the
@@ -231,7 +267,7 @@ fn king_tangle_positions(seed: u64, count: usize) -> Vec<Position> {
 
 #[test]
 fn freeze_delta_matches_the_rescan_oracle_on_king_tangle_positions() {
-    let positions = king_tangle_positions(0xBADCAFE, 400);
+    let positions = king_tangle_positions(0xBADCAFE, scale(2_000));
     let (complete, declined) = check_kind_over_ordered(SpellKind::Freeze, &positions);
     println!("freeze (king tangle): {complete} complete, {declined} declined");
     assert!(complete > 0, "freeze delta never returned Complete on the king-tangle battery");
@@ -239,7 +275,7 @@ fn freeze_delta_matches_the_rescan_oracle_on_king_tangle_positions() {
 
 #[test]
 fn jump_delta_matches_the_rescan_oracle_on_king_tangle_positions() {
-    let positions = king_tangle_positions(0x1CEB00DA, 400);
+    let positions = king_tangle_positions(0x1CEB00DA, scale(2_000));
     let (complete, declined) = check_kind_over_ordered(SpellKind::Jump, &positions);
     println!("jump (king tangle): {complete} complete, {declined} declined");
     assert!(complete > 0, "jump delta never returned Complete on the king-tangle battery");
@@ -247,7 +283,7 @@ fn jump_delta_matches_the_rescan_oracle_on_king_tangle_positions() {
 
 #[test]
 fn freeze_delta_matches_the_rescan_oracle_on_sparse_random_positions() {
-    let positions = sparse_random_positions(0xC0FFEE, 400);
+    let positions = sparse_random_positions(0xC0FFEE, scale(2_000));
     let (complete, declined) = check_kind_over_ordered(SpellKind::Freeze, &positions);
     println!("freeze (sparse): {complete} complete, {declined} declined");
     assert!(complete > 0, "freeze delta never returned Complete on the sparse battery");
@@ -255,7 +291,7 @@ fn freeze_delta_matches_the_rescan_oracle_on_sparse_random_positions() {
 
 #[test]
 fn jump_delta_matches_the_rescan_oracle_on_sparse_random_positions() {
-    let positions = sparse_random_positions(0x5EED, 400);
+    let positions = sparse_random_positions(0x5EED, scale(2_000));
     let (complete, declined) = check_kind_over_ordered(SpellKind::Jump, &positions);
     println!("jump (sparse): {complete} complete, {declined} declined");
     assert!(complete > 0, "jump delta never returned Complete on the sparse battery");
@@ -397,24 +433,41 @@ const DIRS: [(i8, i8); 8] = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), 
 const DENSE_KINDS: [PieceKind; 5] =
     [PieceKind::Pawn, PieceKind::Knight, PieceKind::Bishop, PieceKind::Rook, PieceKind::Queen];
 
-/// Adds a live en-passant square when the geometry supports one. Neither battery
-/// above ever produces one, so the `pos.en_passant.is_some()` decline in
-/// `freeze_captures` and the en-passant arm of `legal_moves` went unexercised by
-/// the random sweeps.
+/// Adds a live en-passant square when the geometry supports one, so the
+/// `pos.en_passant.is_some()` decline in `freeze_captures` and the en-passant arm of
+/// `legal_moves` are exercised by the random sweeps rather than only by fixtures.
+///
+/// All four seeded generators call this. `sparse_random_positions` and
+/// `king_tangle_positions` did not until the counts were scaled up: an ep square arises
+/// here only when the 1-in-4 roll coincides with an enemy pawn already sitting on the
+/// capture rank, which is rare enough per position that it needs volume to show up at all.
+/// Only ever sets a square that a real double push could have left: the ep square empty,
+/// and an enemy pawn on the square it would have skipped over.
 fn maybe_en_passant(pos: &mut Position, state: &mut u64) {
     if splitmix64(state) % 4 != 0 {
         return;
     }
-    let (ep_rank, cap_rank) = if pos.side_to_move == Color::White { (5u8, 4u8) } else { (2u8, 3u8) };
+    let (from_rank, ep_rank, cap_rank) =
+        if pos.side_to_move == Color::White { (6u8, 5u8, 4u8) } else { (1u8, 2u8, 3u8) };
     let file = (splitmix64(state) % 8) as u8;
-    let ep = Square::new(file, ep_rank);
-    let cap = Square::new(file, cap_rank);
-    let victim = pos.board.get(cap);
-    if pos.board.get(ep).is_none()
-        && victim.is_some_and(|p| p.kind == PieceKind::Pawn && p.color != pos.side_to_move)
-    {
-        pos.en_passant = Some(ep);
+    let (from, ep, cap) =
+        (Square::new(file, from_rank), Square::new(file, ep_rank), Square::new(file, cap_rank));
+
+    // Both squares the pawn passed through must be empty, or no double push could have
+    // produced this. Waiting for a victim to happen to be on `cap` made an ep square arise
+    // in ~0.2% of positions; placing one lifts that to the full 1-in-4 roll. Never
+    // overwrite an occupied `cap` -- that could delete a king and make the position
+    // unreachable in a different way than it fixes.
+    if pos.board.get(from).is_some() || pos.board.get(ep).is_some() {
+        return;
     }
+    let victim = Piece { color: pos.side_to_move.opposite(), kind: PieceKind::Pawn };
+    match pos.board.get(cap) {
+        None => pos.board.set(cap, Some(victim)),
+        Some(p) if p == victim => {}
+        Some(_) => return,
+    }
+    pos.en_passant = Some(ep);
 }
 
 /// Ray-dense: most pieces sit on rays radiating from the side-to-move's king, and
@@ -566,7 +619,7 @@ fn cramped_positions(seed: u64, count: usize) -> Vec<Position> {
 
 #[test]
 fn freeze_delta_matches_the_rescan_oracle_on_cramped_positions() {
-    let positions = cramped_positions(0xD1B54A32D192ED03, 250);
+    let positions = cramped_positions(0xD1B54A32D192ED03, scale(1_250));
     let (complete, declined) = check_kind_over_ordered(SpellKind::Freeze, &positions);
     println!("freeze (cramped): {complete} complete, {declined} declined");
     assert!(complete > 0, "freeze delta never returned Complete on the cramped battery");
@@ -574,7 +627,7 @@ fn freeze_delta_matches_the_rescan_oracle_on_cramped_positions() {
 
 #[test]
 fn jump_delta_matches_the_rescan_oracle_on_cramped_positions() {
-    let positions = cramped_positions(0x2545F4914F6CDD1D, 250);
+    let positions = cramped_positions(0x2545F4914F6CDD1D, scale(1_250));
     let (complete, declined) = check_kind_over_ordered(SpellKind::Jump, &positions);
     println!("jump (cramped): {complete} complete, {declined} declined");
     assert!(complete > 0, "jump delta never returned Complete on the cramped battery");
@@ -582,7 +635,7 @@ fn jump_delta_matches_the_rescan_oracle_on_cramped_positions() {
 
 #[test]
 fn freeze_delta_matches_the_rescan_oracle_on_ray_dense_positions() {
-    let positions = ray_dense_positions(0x9E3779B97F4A7C15, 250);
+    let positions = ray_dense_positions(0x9E3779B97F4A7C15, scale(1_250));
     let (complete, declined) = check_kind_over_ordered(SpellKind::Freeze, &positions);
     println!("freeze (ray dense): {complete} complete, {declined} declined");
     assert!(complete > 0, "freeze delta never returned Complete on the ray-dense battery");
@@ -590,8 +643,43 @@ fn freeze_delta_matches_the_rescan_oracle_on_ray_dense_positions() {
 
 #[test]
 fn jump_delta_matches_the_rescan_oracle_on_ray_dense_positions() {
-    let positions = ray_dense_positions(0xBF58476D1CE4E5B9, 250);
+    let positions = ray_dense_positions(0xBF58476D1CE4E5B9, scale(1_250));
     let (complete, declined) = check_kind_over_ordered(SpellKind::Jump, &positions);
     println!("jump (ray dense): {complete} complete, {declined} declined");
     assert!(complete > 0, "jump delta never returned Complete on the ray-dense battery");
+}
+
+/// Guards the generators against silently losing the states they were widened to reach.
+///
+/// Every battery in this file asserts only `complete > 0` and set/order agreement, which a
+/// generator that stopped emitting en-passant states entirely would still satisfy -- it
+/// would just check a smaller world and stay green. That is the failure mode the
+/// `spell-legality-testing` skill calls a fixture passing for the wrong reason, applied to a
+/// generator: nothing here would notice.
+///
+/// The thresholds are deliberately far below the measured rates (~18% of positions carry an
+/// ep square, ~8% carry one alongside a live field) so ordinary drift in the byte stream
+/// does not turn this red. It is a smoke alarm for a mechanism disappearing, not a
+/// distribution test.
+#[test]
+fn the_generators_actually_reach_en_passant_beside_a_live_field() {
+    let batteries: [(&str, Vec<Position>); 4] = [
+        ("sparse", sparse_random_positions(0xC0FFEE, scale(2_000))),
+        ("king tangle", king_tangle_positions(0xBADCAFE, scale(2_000))),
+        ("ray dense", ray_dense_positions(0x9E3779B97F4A7C15, scale(1_250))),
+        ("cramped", cramped_positions(0xD1B54A32D192ED03, scale(1_250))),
+    ];
+    for (name, positions) in batteries {
+        let n = positions.len();
+        let ep = positions.iter().filter(|p| p.en_passant.is_some()).count();
+        let ep_and_field =
+            positions.iter().filter(|p| p.en_passant.is_some() && p.fields.iter().count() > 0).count();
+        println!("{name}: n={n} ep={ep} ep+field={ep_and_field}");
+        assert!(ep * 50 > n, "{name}: only {ep}/{n} positions carry an en-passant square");
+        assert!(
+            ep_and_field * 200 > n,
+            "{name}: only {ep_and_field}/{n} positions pair an en-passant square with a live field \
+             -- the ep x spell interaction is what this battery is for"
+        );
+    }
 }
