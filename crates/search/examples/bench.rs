@@ -3,9 +3,11 @@
 //!
 //!   cargo run --release -p spellchess-search --example bench -- 6
 //!
-//! Threads come from `SPELLCHESS_THREADS`, defaulting to every core. Use
-//! `SPELLCHESS_THREADS=1` for any measurement you want to compare against another
-//! commit: Lazy-SMP timings vary run to run, single-threaded ones do not.
+//! Threads come from `SPELLCHESS_THREADS`, defaulting to **1** -- `default_threads()`
+//! returns 1 because Lazy-SMP measured a net loss on this engine, not because
+//! single-threaded is a safe default. Leave it unset for any measurement you want to
+//! compare against another commit: Lazy-SMP timings vary run to run, single-threaded
+//! ones do not.
 //!
 //! Prefer this over driving `spellchess`'s `go --depth N` for perf work: one process,
 //! one number, no REPL in the way.

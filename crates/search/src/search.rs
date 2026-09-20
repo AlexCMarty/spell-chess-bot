@@ -936,54 +936,81 @@ mod tests {
     /// elsewhere in this test, because it is the longest-running, most
     /// thermal-throttling- and scheduler-contention-exposed case and the one most
     /// likely to rot into flakiness (see the depth-15 bound this test used to carry).
+    ///
+    /// These bounds are calibrated to that one reference machine, not portable as
+    /// absolute numbers (see the `/perf-measurement` skill's "Absolute numbers are
+    /// yours to generate"). `SPELLCHESS_PERF_SCALE` is how you calibrate them
+    /// elsewhere: a float multiplier, default `1.0`, applied to every bound below. On
+    /// hardware measured at 3x the reference wall-clock, set
+    /// `SPELLCHESS_PERF_SCALE=3` to get a meaningful bound instead of editing the test
+    /// or ignoring a spurious failure.
     /// Run with `cargo test -p spellchess-search --release -- --ignored`.
     #[test]
     #[ignore = "slow and misleading in a debug build; see doc comment"]
     fn depth_budget_stays_bounded_on_a_realistic_board() {
+        // Malformed or absent falls back to 1.0 rather than panicking -- this test
+        // must still run (and mean something) with the env var unset.
+        let scale: f64 = std::env::var("SPELLCHESS_PERF_SCALE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|s: &f64| s.is_finite() && *s > 0.0)
+            .unwrap_or(1.0);
+        let scaled = |d: Duration| d.mul_f64(scale);
+
         let pos = Position::starting();
         let start = std::time::Instant::now();
         let result = search(&pos, Budget::Depth(1));
         let elapsed = start.elapsed();
+        let bound = scaled(Duration::from_millis(300));
         assert!(result.is_some(), "a legal turn exists in the starting position");
         assert!(
-            elapsed < Duration::from_millis(300),
-            "depth-1 search on the starting position must finish in under 300ms, took {elapsed:?}",
+            elapsed < bound,
+            "depth-1 search on the starting position must finish in under {bound:?} \
+             (300ms * SPELLCHESS_PERF_SCALE={scale}), took {elapsed:?}",
         );
 
         let start = std::time::Instant::now();
         let result = search(&pos, Budget::Depth(3));
         let elapsed = start.elapsed();
+        let bound = scaled(Duration::from_millis(750));
         assert!(result.is_some(), "a legal turn exists in the starting position");
         assert!(
-            elapsed < Duration::from_millis(750),
-            "depth-3 search on the starting position must finish in under 750ms, took {elapsed:?}",
+            elapsed < bound,
+            "depth-3 search on the starting position must finish in under {bound:?} \
+             (750ms * SPELLCHESS_PERF_SCALE={scale}), took {elapsed:?}",
         );
 
         let start = std::time::Instant::now();
         let result = search(&pos, Budget::Depth(4));
         let elapsed = start.elapsed();
+        let bound = scaled(Duration::from_millis(1500));
         assert!(result.is_some(), "a legal turn exists in the starting position");
         assert!(
-            elapsed < Duration::from_millis(1500),
-            "depth-4 search on the starting position must finish in under 1500ms, took {elapsed:?}",
+            elapsed < bound,
+            "depth-4 search on the starting position must finish in under {bound:?} \
+             (1500ms * SPELLCHESS_PERF_SCALE={scale}), took {elapsed:?}",
         );
 
         let start = std::time::Instant::now();
         let result = search(&pos, Budget::Depth(6));
         let elapsed = start.elapsed();
+        let bound = scaled(Duration::from_secs(15));
         assert!(result.is_some(), "a legal turn exists in the starting position");
         assert!(
-            elapsed < Duration::from_secs(15),
-            "depth-6 search on the starting position must finish in under 15s, took {elapsed:?}",
+            elapsed < bound,
+            "depth-6 search on the starting position must finish in under {bound:?} \
+             (15s * SPELLCHESS_PERF_SCALE={scale}), took {elapsed:?}",
         );
 
         let start = std::time::Instant::now();
         let result = search(&pos, Budget::Depth(8));
         let elapsed = start.elapsed();
+        let bound = scaled(Duration::from_secs(300));
         assert!(result.is_some(), "a legal turn exists in the starting position");
         assert!(
-            elapsed < Duration::from_secs(300),
-            "depth-8 search on the starting position must finish in under 300s, took {elapsed:?}",
+            elapsed < bound,
+            "depth-8 search on the starting position must finish in under {bound:?} \
+             (300s * SPELLCHESS_PERF_SCALE={scale}), took {elapsed:?}",
         );
     }
 
