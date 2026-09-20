@@ -108,7 +108,9 @@ Things a consumer has to know and cannot infer:
 
 Every JSON-building function is a plain Rust `fn` over ordinary types, with no
 `wasm_bindgen` types in its signature. The `#[wasm_bindgen]` methods in `lib.rs` are
-thin shells over them.
+thin shells over them, and the JSON text itself is assembled with `json.rs`'s small
+hand-rolled writer (`object`/`array`/`string`) rather than `serde_json`, to keep it out
+of the wasm binary.
 
 That is why `view.rs` carries the tests and `lib.rs` carries almost no logic: the whole
 JSON layer stays under `cargo test -p spellchess-wasm` on the **native** target, with no
@@ -169,7 +171,6 @@ workflow + PR number or ref so a PR type-check cannot cancel an in-flight `main`
 
 `bench_clock` (`crates/wasm/src/lib.rs`) measures deadline-check overhead in the
 browser — the cost of one `Instant::now()` comparison, in the exact shape `timed_out`
-uses. It has no consumer page at present; `web/clockbench.html` was a throwaway
-measurement page that was accidentally published with the site and has been removed.
-Read the `perf-measurement` skill before drawing conclusions from it, and get node
-counts from the `bench` harness rather than hardcoding them.
+uses. It has no consumer page at present. Read the `perf-measurement` skill before
+drawing conclusions from it, and get node counts from the `bench` harness rather than
+hardcoding them.

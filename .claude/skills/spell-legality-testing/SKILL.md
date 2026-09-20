@@ -114,22 +114,17 @@ When the fast path isn't sure, it should say so and fall back, not approximate.
 
 **4. Emission order is part of the contract, not just the set.**
 
-`generate_quiescence_from` pushes turns unsorted and the consumers read them unsorted, so
-a generator returning the right set in the wrong sequence changes beta-cutoff order and
-qnode counts. Use `check_kind_over_ordered`, which distinguishes `SET MISMATCH` from
-`ORDER MISMATCH`. A best-move-and-score identity test structurally **cannot** catch this.
+The exact required order (castling first, ascending square index, per-`PieceKind` order,
+pawn double-push detail) is specified in the Invariants section of `docs/ARCHITECTURE.md`,
+which is canonical for it — read that, not this skill, for the rule itself.
 
-`pseudo_legal_moves` is **not** sorted by `(from, to)`: it emits **castling first**
-(`out.extend(castle_moves(..))` before the per-square loop), then each own non-frozen
-square in ascending square index, and within a square in fixed per-`PieceKind` order.
-So `e1`'s castle precedes `a1`'s rook moves, and a pawn emits its double push before its
-captures. `pseudo_legal_captures` mirrors that relative order exactly. A replacement must
-reproduce this order, not a sorted one — see the Invariants section of
-`docs/ARCHITECTURE.md`, which is canonical for it.
-
-This is the same invariant as the `/perf-measurement` skill's "node counts must stay
-bit-identical", seen from the generator side: change emission order and the node counts
-move, which that skill will read as a correctness regression rather than a speed win.
+What this skill adds: `generate_quiescence_from` pushes turns unsorted and the consumers
+read them unsorted, so a generator returning the right set in the wrong sequence changes
+beta-cutoff order and qnode counts — the same invariant as the `/perf-measurement`
+skill's "node counts must stay bit-identical," seen from the generator side. Use
+`check_kind_over_ordered`, which distinguishes `SET MISMATCH` from `ORDER MISMATCH`. A
+best-move-and-score identity test structurally **cannot** catch this: two searches can
+agree on the best move and its score while disagreeing on every intermediate node count.
 
 ## Recurring bug shapes — check these by name
 

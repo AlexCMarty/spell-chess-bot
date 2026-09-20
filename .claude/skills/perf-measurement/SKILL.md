@@ -26,9 +26,19 @@ If node/qnode counts move, you changed the tree, not the cost per node — that 
 different kind of change and needs correctness review, not a benchmark. This gate is
 hardware-independent, which makes it the most portable check in this file.
 
+There is also a cheap, always-on complement to the explicit counter comparison above:
+`search_output_is_unchanged` in `crates/search/tests/search_identity.rs` asserts the
+exact returned turn and score, for a small battery of positions at fixed depths, against
+hardcoded `EXPECTED` values. It carries no `#[ignore]`, so plain `cargo test` (debug,
+no env var) already runs it on every change — it will not catch every tree-shape drift
+the node-count comparison would, but it catches the common case for free, with no
+release build and no manual `SPELLCHESS_PROFILE` run required.
+
 This is settled policy, not a preference: speed work must not narrow the search tree.
 The widened quiescence/root behaviour is deliberate and its tactic visibility is not
-traded back for speed.
+traded back for speed. The canonical statement of this invariant (and of the emission-
+order invariant it's downstream of) is `docs/ARCHITECTURE.md#invariants` — this section
+is the procedure for checking it, not the source of truth for it.
 
 ## Which harness answers which question
 
@@ -36,9 +46,15 @@ traded back for speed.
 |---|---|---|
 | `bench` | **What does the search actually cost?** The number that counts. | `cargo run --release -p spellchess-search --example bench -- 6` |
 | `hotcost` | What does one call to a hot function cost? | `cargo run --release -p spellchess-search --example hotcost` |
-| `qprof` | Where does that cost go, inside a node? | `--features spellchess-core/qprofile`, then `examples/qprof.rs` |
+| `qprof` | Where does that cost go, inside a node? | `--features spellchess-core/qprofile`, then `crates/search/examples/qprof.rs` |
 | `SPELLCHESS_PROFILE=1` | How many nodes/qnodes/spell_gens? | env var on the `bench` example (**not** the CLI — see above) |
-| `--ignored` release suite | Did I regress past a known bound? (~156s) | `cargo test -p spellchess-search --release -- --ignored` |
+| `--ignored` release suite | Did I regress past a known bound? (bounds are reference-hardware seconds, scale with `SPELLCHESS_PERF_SCALE` — see below) | `cargo test -p spellchess-search --release -- --ignored` |
+
+This runs every `#[ignore]`d test in the `spellchess-search` package, which today is
+two: `depth_budget_stays_bounded_on_a_realistic_board` (the bound check above) and
+`search_identity.rs`'s `print_expected`, which is not a check at all — it only prints
+turns/scores for regenerating `EXPECTED` after an intentional behaviour change and
+passes unconditionally. Don't read a green `print_expected` as evidence of anything.
 
 `hotcost` says what a call costs; `qprof` says where that cost goes. **They have
 disagreed.** Only `bench` settles whether the search got faster.
@@ -62,6 +78,13 @@ Run the `--ignored` suite before landing anything that touches
 4. Re-run the full `bench` at **both** depth 6 and depth 8. A change can win at one depth
    and lose at the other; this has happened.
 5. Confirm node counts unchanged (above).
+6. Confirm `.cargo/config.toml` is byte-identical in both worktrees, or pin `RUSTFLAGS`
+   explicitly for both runs instead of relying on it. It sets `-C target-cpu=native` for
+   every non-wasm target, so if the baseline worktree predates the commit that added
+   that file (or a later edit to it), the two trees build with different codegen flags —
+   you are then A/B-ing two compilers' output, not two algorithms, and the result is a
+   codegen-gap artifact of exactly the shape the "`--examples` leaves the CLI binary
+   stale" trap below already warns about.
 
 ## Traps that have each cost this project an hour
 
@@ -109,6 +132,19 @@ If your numbers look wildly off from something you read, re-baseline the unmodif
 commit on your own hardware before blaming the environment. Misdiagnosing a slow run as
 "different hardware" when it was a real regression has happened here.
 
+### Calibrating `SPELLCHESS_PERF_SCALE`
+
+The `--ignored` release suite's `depth_budget_stays_bounded_on_a_realistic_board` test
+is the one exception to "don't treat an absolute second-count as a target": it has to
+assert *some* wall-clock number to be a regression guard at all. It reads
+`SPELLCHESS_PERF_SCALE`, a float multiplier applied to every bound in the test, default
+`1.0` — the default targets the reference Raspberry Pi 5 the bounds were measured on.
+To calibrate on new hardware: run the suite unmodified at scale 1.0 on an unchanged
+commit, take the ratio of your wall-clock time to the reference figure in the test's doc
+comment, and export `SPELLCHESS_PERF_SCALE=<that ratio>` for future runs there. Don't
+edit the bounds in the test itself — that's exactly the drift this variable exists to
+avoid.
+
 ## Known dead ends — do not retry these blind
 
 **Lazy-SMP: implemented, measured a loss, defaulted off.** `search_smp` exists and works;
@@ -130,6 +166,15 @@ entry-only call sites.
 `generate_quiescence_turns_from` with the cheap recapture generator made depth 6 3.4x
 faster and depth 8 *slower* (>400s vs 258s). The spell-enabled captures feed real
 beta cutoffs.
+
+These per-figure timings are attributed to the reference Pi 5 but not to a commit. The
+258s and ~90–150s depth-8 figures on this page differ by roughly 2x on the same stated
+hardware — almost certainly because they were measured at different points in the
+project's optimization history (a `bench` run against whatever `spellchess-core` looked
+like at the time), not a contradiction. Don't average or reconcile them; each is only
+meaningful relative to the commit it was measured against, which none of these notes
+record. Re-baseline on your own hardware and commit rather than trying to slot your
+number in between these two.
 
 ## Mechanical notes
 

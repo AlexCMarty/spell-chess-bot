@@ -27,18 +27,18 @@ staying provably identical to it. Once you see that, the module layout follows.
 | `crates/core` | nothing internal | Board, move generation, spells, legality. The rules engine. |
 | `crates/search` | `core` | Alpha-beta with quiescence, transposition table, move ordering, evaluation. |
 | `crates/cli` | `core` + `search` | The `spellchess` REPL binary. |
-| `crates/wasm` | `core` + `search` | The browser boundary. `lib.rs` is the `wasm-bindgen` shell (its bulk is `#[cfg(target_arch = "wasm32")]`, so **no native build compiles it**); `view.rs` is the testable JSON layer. See [`WEB.md`](WEB.md). |
+| `crates/wasm` | `core` + `search` | The browser boundary. `lib.rs` is the `wasm-bindgen` shell (its bulk is `#[cfg(target_arch = "wasm32")]`, so **no native build compiles it**); `view.rs` is the testable JSON layer, built on `json.rs`'s hand-rolled writer (keeps `serde_json` out of the wasm binary). See [`WEB.md`](WEB.md). |
 | `crates/core/fuzz` | `core` | `cargo-fuzz` targets. **Own `[workspace]` table — not built or tested by `--workspace`.** |
 
 ## Where the difficulty actually lives
 
 Two files are more than half the hard code:
 
-- **`core/src/spell_delta.rs`** (~1,470 lines) — computes the captures a spell newly makes
+- **`crates/core/src/spell_delta.rs`** — computes the captures a spell newly makes
   legal *directly from bitboards*, instead of building a hypothetical position and
   rescanning it. This is the optimization the whole engine is built around, and it is
   where every legality bug in this project's history has lived.
-- **`core/src/legal.rs`** (~1,410 lines) — full legality: `legal_moves`, `legal_captures`,
+- **`crates/core/src/legal.rs`** — full legality: `legal_moves`, `legal_captures`,
   and the six turn generators below. It builds a `NodeContext` — defined in
   `spell_delta.rs`, constructed here, once per node — which precomputes the per-node
   state (frozen set, jump fields, slider occupancy, checkers, pins) that the delta path
@@ -46,7 +46,12 @@ Two files are more than half the hard code:
 
 Everything else is comparatively mechanical: `bitboard.rs`, `board.rs`, `types.rs`,
 `rays.rs`, `attacks.rs`, `movegen.rs` (pseudo-legal generation), `fields.rs` (live spell
-fields), `spells.rs` (spell targeting + relevance filtering), `terminal.rs` (win/draw).
+fields), `spells.rs` (spell targeting + relevance filtering), `terminal.rs` (win/draw),
+`position.rs` (the `Position` struct and other game-state types: spell counters,
+spell fields, castle rights), `qprof.rs` (opt-in per-bucket profiling counters, compiled
+out unless the `qprofile` feature is on), and `notation.rs` (parsing/formatting a `Turn`
+to and from algebraic text — `parse_turn`/`format_turn` — moved here from `crates/cli`
+in commit `4735a22` so both the CLI and the browser could share it).
 
 ## The turn-generator family
 
@@ -55,11 +60,15 @@ differ along two axes: how complete the spell coverage is, and how expensive.
 
 | Generator | Used by | Spell coverage |
 |---|---|---|
-| `generate_turns` | CLI, `terminal.rs` | **Exhaustive.** All spell targets, full rescan. The reference oracle. |
+| `generate_turns` | CLI and the browser (both via `crates/core/src/notation.rs`'s `parse_turn`), `crates/wasm/src/view.rs`'s `find_turn` and `crates/wasm/src/lib.rs` (legal-move highlighting), `terminal.rs`, and several differential test suites | **Exhaustive.** All spell targets, full rescan. The reference oracle. |
 | `generate_search_turns` | `best_turn`, the depth-0 terminal check, and the out-of-time root fallback — **not** the main node expansion | Relevance-filtered targets, paired with the full baseline |
 | `generate_search_spell_turns` | search | Spell-paired turns only, no no-spell copies — so a beta cutoff can skip the expensive pairing |
-| `generate_quiescence_turns` / `_turns_from` | quiescence **entry** | Captures, including jump- and freeze-enabled *new* captures. Expensive: a scan per relevant target. |
+| `generate_quiescence_turns_from` | quiescence **entry** | Captures, including jump- and freeze-enabled *new* captures. Expensive: a scan per relevant target. |
 | `generate_quiescence_recapture_turns` | quiescence **recursion** | Captures plus "freeze the recapturer" only. Cheap, pure bitboard. |
+
+(`generate_quiescence_turns`, without the `_from` suffix, is not a production path — its
+only callers are its own definition and one hand-built unit test in `legal.rs`. Search
+reaches quiescence exclusively through `generate_quiescence_turns_from`.)
 
 A node in `alphabeta` does not call any single generator from this table: it builds its
 baseline with `legal_moves` + `no_spell_turns`, then adds either
@@ -89,7 +98,19 @@ make that safe, and both are load-bearing:
 Follow this pattern for any new fast path. Do not extend the delta to a case you cannot
 prove; return `NeedsRescan`.
 
+One gap here is deliberate, not unfinished: `generate_turns`/`generate_search_turns`/
+`generate_search_spell_turns` still resolve their own rescans in `generate_turns_from`
+via `legal_moves(&hypothetical)` rather than `spell_delta`. Moving them onto the delta
+path was spiked and shelved — measured at ~0.6% of total runtime, not worth the added
+legality-reasoning risk. See
+[issue #1](https://github.com/AlexCMarty/spell-chess-bot/issues/1); do not restart that
+migration unprompted.
+
 ## Invariants
+
+This section is the canonical statement of the node/qnode-count and emission-order
+invariants below. CLAUDE.md, README.md, and the skills in `.claude/skills/` carry
+one-line versions of them that point back here.
 
 - **Node counts are the perf gate.** A performance change must leave node/qnode counts
   bit-identical. If they move, you changed the search tree, which is a correctness change
@@ -134,16 +155,26 @@ prove; return `NeedsRescan`.
 
 | Path | Role |
 |---|---|
-| `core/tests/*_soundness.rs` | Differential batteries: fast path vs. the slow oracle, over generated positions |
-| `core/tests/oracle_vectors.rs` | Positions verified against chess.com's own engine |
-| `core/tests/legal_captures.rs` | Hand-derived expected outputs |
-| `search/tests/search_identity.rs` | Best turn + score stability |
+| `crates/core/tests/*_soundness.rs` | Differential batteries: fast path vs. the slow oracle, over generated positions (includes `relevance_soundness.rs`, checking relevance-filtered targets against the exhaustive set) |
+| `crates/core/tests/oracle_vectors.rs` | Positions verified against chess.com's own engine |
+| `crates/core/tests/legal_captures.rs` | Hand-derived expected outputs |
+| `crates/search/tests/search_identity.rs` | Best turn + score stability |
+| `crates/wasm/src/view.rs` (`#[cfg(test)]`) | JSON-layer tests, runnable on the native target with no browser — see [`WEB.md`](WEB.md#testability-rule) |
 | `crates/core/fuzz/` | `cargo-fuzz` targets, run manually |
 
 Read the `spell-legality-testing` skill before writing tests here. The short version: the
 generated batteries are a regression net, not a discovery tool — every legality bug this
 project has shipped was found by a hand-built adversarial geometry or by mutation-testing
 a guard, never by a uniform-random battery.
+
+A few tests are `#[ignore]`d as too slow for a normal run — including
+`crates/search/src/search.rs`'s `depth_budget_stays_bounded_on_a_realistic_board`, which
+is also release-build-specific (its bounds are "misleading in a debug build"), and
+`crates/core/tests/legal_moves_soundness.rs`'s dense random-walk battery (grep `#\[ignore`
+for the rest). Run the release suite with `cargo test --release -- --ignored` before
+landing anything that touches `generate_quiescence_from` /
+`generate_quiescence_turns_from` — a regression once sat on `main` for a full commit
+because that step was skipped. See the `perf-measurement` skill.
 
 ## Performance harnesses
 

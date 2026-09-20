@@ -42,7 +42,7 @@ drive both, and a WebAssembly build behind the site:
 | [`crates/core`](crates/core) | Board representation, legal move/spell generation, the rules engine. No internal deps. |
 | [`crates/search`](crates/search) | Alpha-beta search with quiescence, built on `core`. Lazy-SMP is implemented but defaults **off** — it measured a net loss here. |
 | [`crates/cli`](crates/cli) | The `spellchess` binary: a REPL for playing out positions and asking the engine for a move. |
-| [`crates/wasm`](crates/wasm) | The `wasm-bindgen` boundary: `lib.rs` is the browser shell, `view.rs` the natively-testable JSON layer. |
+| [`crates/wasm`](crates/wasm) | The `wasm-bindgen` boundary: `lib.rs` is the browser shell, `view.rs` the natively-testable JSON layer, and `json.rs` a hand-rolled JSON writer (escaping, objects, arrays) that keeps `serde_json` out of the wasm binary. |
 | [`web/`](web) | The static front end — `app.js` (view), `worker.js` (owns the game), `primer.js` (rules cards). See [`docs/WEB.md`](docs/WEB.md). |
 
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) explains how those fit together, which two
@@ -134,10 +134,19 @@ have burned this project repeatedly:
   was caught by a hand-built adversarial position or by mutation-testing a guard. The
   generated batteries are a regression net.
 
-If you use Claude Code, both are written up as skills in `.claude/skills/` and load
-automatically when relevant. The repo also ships a `PreToolUse` hook that blocks any
-chess.com URL other than the analysis board — you will be asked to trust it on first run.
-Verify it with `bash .claude/hooks/test-guard-chesscom-url.sh`.
+If you use Claude Code, all four are written up as skills in `.claude/skills/` and load
+automatically when relevant: the two above, plus one for verifying a rule against chess.com's
+own engine and adding a fixture, and one for the checklist a `spellchess-core` public API
+change requires.
+
+The repo also ships a `PreToolUse` hook (`.claude/hooks/guard-chesscom-url.py`) that catches
+the common ways a tool call could open the wrong chess.com page — `Bash` commands that look
+like a fetch, and URL-shaped fields on `WebFetch`/browser-automation tools — but it's a
+backstop, not a guarantee: it doesn't cover `WebSearch`, doesn't follow redirects, and fails
+open (exits 0) on its own errors by design, so don't rely on it in place of the rule above.
+You will be asked to trust it on first run; verify it with
+`bash .claude/hooks/test-guard-chesscom-url.sh`.
+([#10](https://github.com/AlexCMarty/spell-chess-bot/issues/10) tracks tightening it.)
 
 ### The engine bundle
 
