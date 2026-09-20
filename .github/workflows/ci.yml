@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Newest run in a group wins, mirroring pages.yml's style: a fresh push shouldn't
+# leave a stale run occupying a runner.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ci-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ci-
+
+      # NOTE: no `cargo fmt --all --check` step here. As of this workflow's
+      # introduction the tree is not `rustfmt`-clean (431 diff hunks across most of
+      # crates/core and crates/search), so adding the check now would make CI red on
+      # arrival for reasons unrelated to the PR under test. Re-add it once the repo
+      # has been formatted (or formatted incrementally and each touched file is
+      # clean) — do not add `-D warnings` to clippy for the same reason: see below.
+      - name: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+  # Separate from `test` because `crates/core/fuzz/` carries its own `[workspace]`
+  # table and is deliberately excluded from the root workspace (see CLAUDE.md and
+  # docs/WEB.md's "Traps" section) — `cargo build|test --workspace` above never
+  # touches it. `cargo +nightly fuzz build` is the only thing that catches a break
+  # in the fuzz targets (`fuzz_freeze`, `fuzz_jump`) when spellchess-core's public
+  # API changes underneath them.
+  fuzz-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            crates/core/fuzz/target
+          key: fuzz-${{ hashFiles('Cargo.lock') }}
+          restore-keys: fuzz-
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: cargo +nightly fuzz build
+        working-directory: crates/core
+        run: cargo +nightly fuzz build
