@@ -50,6 +50,33 @@ fn place(r: &mut ByteReader, free: &mut Vec<Square>, pos: &mut Position, sq: Squ
     pos.board.set(sq, Some(Piece { color, kind }));
 }
 
+/// Byte-driven counterpart of `maybe_en_passant` in
+/// `crates/core/tests/spell_delta_soundness.rs`. Places the victim pawn rather than
+/// waiting for one to land on the capture rank, which in the seeded battery lifted
+/// en-passant coverage from ~0.2% of positions to ~18%. Only ever produces a state a real
+/// double push could have left: both squares the pawn passed through empty, and the victim
+/// never overwriting a piece already standing on the capture square.
+fn maybe_en_passant(r: &mut ByteReader, pos: &mut Position) {
+    if r.next_u8() % 4 != 0 {
+        return;
+    }
+    let (from_rank, ep_rank, cap_rank) =
+        if pos.side_to_move == Color::White { (6u8, 5u8, 4u8) } else { (1u8, 2u8, 3u8) };
+    let file = (r.next_u8() % 8) as u8;
+    let (from, ep, cap) =
+        (Square::new(file, from_rank), Square::new(file, ep_rank), Square::new(file, cap_rank));
+    if pos.board.get(from).is_some() || pos.board.get(ep).is_some() {
+        return;
+    }
+    let victim = Piece { color: pos.side_to_move.opposite(), kind: PieceKind::Pawn };
+    match pos.board.get(cap) {
+        None => pos.board.set(cap, Some(victim)),
+        Some(p) if p == victim => {}
+        Some(_) => return,
+    }
+    pos.en_passant = Some(ep);
+}
+
 /// Byte-driven counterpart of `king_tangle_positions` in
 /// `crates/core/tests/spell_delta_soundness.rs` -- same construction (kings
 /// placed, 1-3 pieces crowding them, 1-4 more anywhere, up to 2 spell fields
@@ -91,6 +118,7 @@ fn decode_position(r: &mut ByteReader) -> Position {
 
     pos.side_to_move = if r.next_u8() & 1 == 0 { Color::White } else { Color::Black };
     pos.ply = 8;
+    maybe_en_passant(r, &mut pos);
     let our_king = if pos.side_to_move == Color::White { wk } else { bk };
     for _ in 0..r.range(3) {
         let square = if r.next_u8() & 1 == 0 {
